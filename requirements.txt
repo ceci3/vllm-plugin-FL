@@ -1,0 +1,6 @@
+decorator
+pyyaml
+scipy
+setuptools
+setuptools-scm
+flagcx==0.3.0
