@@ -2459,18 +2459,17 @@ class ModelRunnerFL(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
         )
-        return output
 
         ### TODO(lms): support async schedule
-        # if not self.use_async_scheduling:
-        #     return output
+        if not self.use_async_scheduling:
+            return output
 
-        # return AsyncGPUModelRunnerOutput(
-        #     model_runner_output=output,
-        #     sampled_token_ids=sampler_output.sampled_token_ids,
-        #     invalid_req_indices=invalid_req_indices,
-        #     async_output_copy_stream=self.async_output_copy_stream,
-        # )
+        return AsyncGPUModelRunnerOutput(
+            model_runner_output=output,
+            sampled_token_ids=sampler_output.sampled_token_ids,
+            invalid_req_indices=invalid_req_indices,
+            async_output_copy_stream=self.async_output_copy_stream,
+        )
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         if self._draft_token_ids is None:
