@@ -96,7 +96,7 @@ class WorkerFL(WorkerBase):
         else:
             self.profiler = None
         register_oot_ops()
-        flag_gems.enable(record=False)
+        flag_gems.enable(record=False, unused=["index", "index_put_"])
 
     # def sleep(self, level: int = 1) -> None:
     #     from vllm.device_allocator.cumem import CuMemAllocator
