@@ -15,7 +15,6 @@ sys.path.append(os.getenv('FLAGCX_PATH'))
 from plugin.interservice.flagcx_wrapper import (
     FLAGCXLibrary,
     buffer_type,
-    cudaStream_t,
     flagcxComm_t,
     flagcxDataTypeEnum,
     flagcxUniqueId,
