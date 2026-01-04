@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
+from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_pp_group,
@@ -52,18 +53,14 @@ from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
-
+from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm_fl.worker.model_runner import ModelRunnerFL
 
-from vllm_fl.worker.model_runner import ModelRunnerFL
-from vllm_fl.ops.custom_ops import register_oot_ops
-
-import flag_gems
 
 
 class WorkerFL(WorkerBase):
@@ -106,8 +103,11 @@ class WorkerFL(WorkerBase):
         else:
             self.profiler = None
         
-        register_oot_ops()
-        flag_gems.enable(record=False) #, unused=["index", "index_put_"])
+        if "USE_FLAGGEMS" in os.environ and os.environ["USE_FLAGGEMS"] == "1":
+            from vllm_fl.ops.custom_ops import register_oot_ops
+            import flag_gems
+            register_oot_ops()
+            flag_gems.enable(record=False) #, unused=["index", "index_put_"])
 
     # def sleep(self, level: int = 1) -> None:
     #     TODO(lms): rewrite CuMemAllocator
@@ -243,6 +243,7 @@ class WorkerFL(WorkerBase):
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
         init_workspace_manager(self.device, num_ubatches)
 
+        from vllm_fl.worker.model_runner import ModelRunnerFL
         # Construct the model runner
         self.model_runner = ModelRunnerFL(
             self.vllm_config, self.device)
@@ -421,6 +422,10 @@ class WorkerFL(WorkerBase):
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         ### NOTE(lms): can add gems kernel pretune here
+        # Warmup and tune the kernels used during model execution before
+        # cuda graph capture.
+        kernel_warmup(self)
+
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()

@@ -5,7 +5,7 @@ from vllm.attention.backends.registry import (
 
 def register_attention():
     register_backend(
-            backend=AttentionBackendEnum.FLASH_ATTN,
+            backend=AttentionBackendEnum.TRITON_ATTN,
             class_path="vllm_fl.attention.attention.AttentionFLBackend",
             is_mamba=False,
         )

@@ -12,10 +12,11 @@ from typing_extensions import ParamSpec
 
 import torch
 
-from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.attention.backends.registry import AttentionBackendEnum, register_backend
 from vllm.logger import init_logger
 
 from vllm.platforms import Platform, PlatformEnum
+from vllm.platforms.interface import DeviceCapability
 
 if TYPE_CHECKING:
     from vllm.attention.selector import AttentionSelectorConfig
@@ -42,7 +43,10 @@ def _get_backend(
         raise NotImplementedError("NOT support mla now!")
         # return "vllm_fl.attention.backends.mla.MLAFLBackend"
     else:
-        return AttentionBackendEnum.FLASH_ATTN #"vllm_fl.attention.attention.AttentionFLBackend"
+        if "USE_FLAGGEMS" in os.environ and os.environ["USE_FLAGGEMS"] == "1":
+            return [AttentionBackendEnum.TRITON_ATTN] #"vllm_fl.attention.attention.AttentionFLBackend"
+        return [AttentionBackendEnum.FLASH_ATTN] 
+        
         
 
 class PlatformFL(Platform):
@@ -58,6 +62,10 @@ class PlatformFL(Platform):
     # device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
     def is_cuda_alike(self) -> bool:
+        """Stateless version of [torch.cuda.is_available][]."""
+        return self.device_type == "cuda"
+    
+    def is_cuda(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
         return self.device_type == "cuda"
 
@@ -163,13 +171,19 @@ class PlatformFL(Platform):
     ) -> list[str]:
         from vllm_fl.attention.custom_attention import register_attention
         register_attention()
-        backend = _get_backend(
-            use_mla=False,
-            device_info=cls.device_info,
-        )
+        device_capability = cls.get_device_capability()
+        
+        if selected_backend is None:
+            backend = _get_backend(
+                use_mla=False,
+                device_info=cls.device_info,
+            )[0]  # get the highest priority backend
+        else:
+            backend = selected_backend
+        
         backend_class = backend.get_class()
         invalid_reasons = backend_class.validate_configuration(
-                    device_capability=None,
+                    device_capability=device_capability,
                     **attn_selector_config._asdict(),
                 )
         reasons_str = (
@@ -271,11 +285,17 @@ class PlatformFL(Platform):
         if cls.dist_backend == "flagcx":
             return False
         return True
+
+    @classmethod
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
+        major, minor = torch.cuda.get_device_capability(device_id)
+        return DeviceCapability(major=major, minor=minor)
     
     @classmethod
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
         try:
             import pynvml
+            pynvml.nvmlInit()
             """
             query if the set of gpus are fully connected by nvlink (1 hop)
             """
