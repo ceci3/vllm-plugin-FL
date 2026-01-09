@@ -11,31 +11,36 @@ import numpy as np
 import torch
 
 from vllm import envs
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType,
-                                              is_quantized_kv_cache)
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionType,
+    MultipleOf,
+    is_quantized_kv_cache,
+)
 from vllm.attention.layer import Attention
 from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
-from vllm.attention.backends.registry import (
-    AttentionBackendEnum,
-    register_backend,
-)
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+
+from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.utils import (AttentionCGSupport,
-                                              AttentionMetadataBuilder,
-                                              CommonAttentionMetadata,
-                                              get_dcp_local_seq_lens,
-                                              get_kv_cache_layout)
+from vllm.v1.attention.backends.utils import (
+    AttentionCGSupport,
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+    get_dcp_local_seq_lens,
+    get_kv_cache_layout,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.platforms.interface import DeviceCapability
 from flag_gems import flash_attn_varlen_func, reshape_and_cache_flash
+# from vllm.attention.utils.fa_utils import flash_attn_varlen_func #reshape_and_cache_flash, 
+# from flag_gems import reshape_and_cache_flash
 
 logger = init_logger(__name__)
 
@@ -45,9 +50,25 @@ class AttentionFLBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
 
-    @classmethod
-    def supports_head_size(cls, head_size: int) -> list[int]:
-        return head_size % 8 == 0 and head_size <= 256
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        vllm_config = get_current_vllm_config()
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+        if (
+            model_config
+            and model_config.is_hybrid
+            and (
+                cache_config.mamba_ssm_cache_dtype == "float32"
+                or cache_config.mamba_cache_dtype == "float32"
+            )
+        ):
+            # NOTE(tdoublep): while in principle, FA supports
+            # MultipleOf(16), these are the block sizes that do not
+            # suffer from the NaN propagation problem described here:
+            # https://github.com/Dao-AILab/flash-attention/issues/1974
+            return [16, 32, 64]
+        return [MultipleOf(16)]
 
     @staticmethod
     def get_name() -> str:
@@ -65,9 +86,6 @@ class AttentionFLBackend(AttentionBackend):
     def get_impl_cls() -> type["AttentionFLImpl"]:
         return AttentionFLImpl
 
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return AttentionFLMetadata
 
     @staticmethod
     def get_builder_cls() -> type["AttentionFLMetadataBuilder"]:
@@ -116,6 +134,10 @@ class AttentionFLBackend(AttentionBackend):
         else:
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
+
+    @classmethod
+    def supports_head_size(cls, head_size: int) -> bool:
+        return head_size % 8 == 0 and head_size <= 256
 
     @classmethod
     def supports_combination(
@@ -313,7 +335,6 @@ class AttentionFLMetadataBuilder(AttentionMetadataBuilder[AttentionFLMetadata]):
             max_num_splits = self.max_num_splits
 
         use_cascade = common_prefix_len > 0
-        use_cascade = common_prefix_len > 0
         max_dcp_context_kv_len = 0
         dcp_context_kv_lens = None
 
@@ -353,11 +374,12 @@ class AttentionFLMetadataBuilder(AttentionMetadataBuilder[AttentionFLMetadata]):
             prefix_scheduler_metadata = None
             scheduler_metadata = None
         else:
-            cu_prefix_query_lens = None
-            prefix_kv_lens = None
-            suffix_kv_lens = None
-            prefix_scheduler_metadata = None
             scheduler_metadata = None
+            # cu_prefix_query_lens = None
+            # prefix_kv_lens = None
+            # suffix_kv_lens = None
+            # prefix_scheduler_metadata = None
+            # scheduler_metadata = None
 
         # For FA3 + full cudagraph
         if self.use_full_cuda_graph and scheduler_metadata is not None:
@@ -435,7 +457,7 @@ class AttentionFLImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         self.attn_type = attn_type
-        self.vllm_flash_attn_version = 2 #get_flash_attn_version()
+        self.vllm_flash_attn_version = 3 # 2 #get_flash_attn_version()
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = vllm_is_batch_invariant()
 
@@ -729,7 +751,8 @@ class AttentionFLImpl(AttentionImpl):
 
         descale_shape = (
             cu_seqlens_q.shape[0] - 1,  # type: ignore[union-attr]
-            self.num_kv_heads)
+            self.num_kv_heads,
+        )
 
         # Call flash attention directly on Q, K, V tensors
         flash_attn_varlen_func(
@@ -750,6 +773,7 @@ class AttentionFLImpl(AttentionImpl):
             q_descale=layer._q_scale.expand(descale_shape),
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
+            # num_splits=0,
         )
 
         return output
@@ -874,10 +898,10 @@ def cascade_attention(
         q=query,
         k=key_cache,
         v=value_cache,
-        max_seqlen_q=num_tokens,
         cu_seqlens_q=cu_prefix_query_lens,
-        max_seqlen_k=common_prefix_len,
         seqused_k=prefix_kv_lens,
+        max_seqlen_q=num_tokens,
+        max_seqlen_k=common_prefix_len,
         softmax_scale=softmax_scale,
         causal=False,
         window_size=sliding_window,
@@ -889,6 +913,7 @@ def cascade_attention(
         q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
         k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
+        # num_splits=0,
     )
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
@@ -898,10 +923,10 @@ def cascade_attention(
         q=query,
         k=key_cache,
         v=value_cache,
-        max_seqlen_q=max_query_len,
         cu_seqlens_q=cu_query_lens,
-        max_seqlen_k=max_kv_len - common_prefix_len,
         seqused_k=suffix_kv_lens,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len - common_prefix_len,
         softmax_scale=softmax_scale,
         causal=True,
         window_size=sliding_window,
@@ -913,8 +938,8 @@ def cascade_attention(
         q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
         k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
+        # num_splits=0,
     )
 
-    ### TODO(lms): can specify triton version
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output, suffix_lse)

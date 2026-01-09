@@ -47,7 +47,6 @@ def _get_backend(
             return [AttentionBackendEnum.TRITON_ATTN] #"vllm_fl.attention.attention.AttentionFLBackend"
         return [AttentionBackendEnum.FLASH_ATTN] 
         
-        
 
 class PlatformFL(Platform):
     _enum = PlatformEnum.OOT

@@ -23,7 +23,8 @@ from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import(
-    AttentionBackend, 
+    AttentionBackend,
+    AttentionMetadata,
     AttentionType, 
     MultipleOf)
 from vllm.attention.layer import Attention, MLAAttention
@@ -45,7 +46,6 @@ from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
     get_tp_group,
-    graph_capture,
     is_global_first_rank,
     prepare_communication_buffer_for_model,
     GraphCaptureContext
@@ -213,7 +213,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 from vllm_fl.compilation.graph import GraphWrapper
-from vllm_fl.attention.attention import AttentionMetadata
 
 
 logger = init_logger(__name__)
@@ -1896,7 +1895,7 @@ class ModelRunnerFL(
             use_alibi=self.use_alibi,
             use_sliding_window=use_sliding_window,
             use_local_attention=use_local_attention,
-            num_sms=self.num_sms,
+            num_sms=1,
             dcp_world_size=self.dcp_world_size,
         )
         return common_prefix_len if use_cascade else 0
@@ -3723,6 +3722,8 @@ class ModelRunnerFL(
             if self.eplb_state.is_async:
                 self.eplb_state.start_async_loop(rank_mapping=rank_mapping)
 
+        # print(f"{self.vllm_config.compilation_config.mode=}")
+
         if (
             self.vllm_config.compilation_config.mode
             == CompilationMode.STOCK_TORCH_COMPILE
@@ -3738,7 +3739,7 @@ class ModelRunnerFL(
         # wrap the model with full cudagraph wrapper if needed.
         cudagraph_mode = self.compilation_config.cudagraph_mode
         assert cudagraph_mode is not None
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs() and not self.parallel_config.enable_dbo:
+        if cudagraph_mode.has_full_cudagraphs() and not self.parallel_config.enable_dbo:
             self.model = GraphWrapper(
                 self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
             )

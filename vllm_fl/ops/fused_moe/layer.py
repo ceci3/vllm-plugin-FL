@@ -69,6 +69,7 @@ class UnquantizedFusedMoEMethodFL(UnquantizedFusedMoEMethod):
         
 
 class FusedMoEFL(FusedMoE):
+    
     def forward_oot(self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
