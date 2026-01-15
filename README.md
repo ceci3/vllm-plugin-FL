@@ -23,12 +23,18 @@ A vLLM plugin built on the FlagOS unified multi-chip backend.
 
     2.3 Installation FlagGems
 
-    ```shell
+    ```sh
     git clone https://github.com/flagos-ai/FlagGems
     cd FlagGems
     pip install --no-build-isolation .
     # or editble install
     pip install --no-build-isolation -e .
+    ```
+
+    2.4 Using FlagGems operators
+
+    ```sh
+    export USE_FLAGGEMS=1
     ```
 
 3. Install FlagCX
@@ -88,4 +94,18 @@ if __name__ == '__main__':
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+```
+
+## Advanced use
+
+### Using CudaCommunication library
+If you want to use the original CudaCommunication, you can unset the following environment variables.
+```sh
+unset FLAGCX_PATH
+```
+
+### Using native CUDA operators
+If you want to use the original CUDA operators, you can unset the following environment variables.
+```sh
+unset USE_FLAGGEMS
 ```
