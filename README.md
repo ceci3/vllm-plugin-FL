@@ -5,7 +5,7 @@ A vLLM plugin built on the FlagOS unified multi-chip backend.
 
 ### Setup
 
-0. Install vllm from the official [v0.11.0](https://github.com/vllm-project/vllm/tree/v0.11.0) (optional if the correct version is installed) or from the fork [vllm-FL](https://github.com/flagos-ai/vllm-FL).
+0. Install vllm from the official [v0.13.0](https://github.com/vllm-project/vllm/tree/v0.13.0) (optional if the correct version is installed) or from the fork [vllm-FL](https://github.com/flagos-ai/vllm-FL).
 
 1. Clone the repository:
 
@@ -41,7 +41,7 @@ A vLLM plugin built on the FlagOS unified multi-chip backend.
 
     3.1 Clone the repository:
     ```sh
-    git clone GitHub - flagos-ai/FlagCX
+    git clone https://github.com/flagos-ai/FlagCX.git
     git checkout -b v0.7.0
     ```
 
