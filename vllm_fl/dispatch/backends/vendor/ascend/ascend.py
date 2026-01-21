@@ -1,11 +1,9 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
 
 """
-Reference backend implementation using PyTorch.
+Ascend backend implementation.
 
-This backend provides reference operator implementations using native PyTorch
-operations. These implementations are always available when PyTorch is installed
-and serve as fallback implementations.
+This backend provides operator implementations for Huawei Ascend NPUs.
 """
 
 from __future__ import annotations
@@ -17,30 +15,39 @@ import torch
 from vllm_fl.dispatch.backends.base import Backend
 
 
-class ReferenceBackend(Backend):
+class AscendBackend(Backend):
     """
-    Reference backend for operator implementations.
+    Ascend backend for operator implementations.
 
-    This backend uses native PyTorch operations to provide reference
-    implementations that are always available as fallbacks.
+    This backend uses Ascend CANN libraries to provide high-performance
+    operator implementations for Huawei Ascend NPUs.
     """
 
     _available: Optional[bool] = None
 
     @property
     def name(self) -> str:
-        return "reference"
+        return "ascend"
+
+    @property
+    def vendor(self) -> Optional[str]:
+        return "ascend"
 
     def is_available(self) -> bool:
-        """Check if PyTorch is available."""
-        if ReferenceBackend._available is None:
+        """Check if Ascend hardware and libraries are available."""
+        if AscendBackend._available is None:
             try:
-                import torch
+                # Check for torch_npu (Ascend PyTorch extension)
+                import torch_npu
 
-                ReferenceBackend._available = True
-            except ImportError:
-                ReferenceBackend._available = False
-        return ReferenceBackend._available
+                # Check if NPU device is available
+                if torch.npu.is_available() and torch.npu.device_count() > 0:
+                    AscendBackend._available = True
+                else:
+                    AscendBackend._available = False
+            except (ImportError, AttributeError):
+                AscendBackend._available = False
+        return AscendBackend._available
 
     # ==================== Operator Implementations ====================
 
@@ -54,9 +61,9 @@ class ReferenceBackend(Backend):
         Returns:
             Output tensor of shape [..., d]
         """
-        from .impl.activation import silu_and_mul_torch
+        from .impl.activation import silu_and_mul_ascend
 
-        return silu_and_mul_torch(x)
+        return silu_and_mul_ascend(x)
 
     def rmsnorm(
         self,
@@ -77,9 +84,9 @@ class ReferenceBackend(Backend):
         Returns:
             Normalized tensor, or tuple of (normalized, residual) if residual is provided
         """
-        from .impl.normalization import rmsnorm_torch
+        from .impl.normalization import rmsnorm_ascend
 
-        return rmsnorm_torch(x, residual, weight, epsilon)
+        return rmsnorm_ascend(x, residual, weight, epsilon)
 
     def rotary_embedding(
         self,
@@ -101,14 +108,14 @@ class ReferenceBackend(Backend):
             sin: Sine cache
             position_ids: Position indices
             rotary_interleaved: Whether to use interleaved rotary
-            inplace: Whether to modify tensors in-place (ignored in reference impl)
+            inplace: Whether to modify tensors in-place
 
         Returns:
             Tuple of (embedded_query, embedded_key)
         """
-        from .impl.rotary import rotary_embedding_torch
+        from .impl.rotary import rotary_embedding_ascend
 
-        return rotary_embedding_torch(
+        return rotary_embedding_ascend(
             query,
             key,
             cos,
@@ -120,20 +127,21 @@ class ReferenceBackend(Backend):
 
     def attention_backend(self, use_mla: bool = False) -> str:
         """
-        Get the attention backend class path for reference (vLLM native).
+        Get the attention backend class path for Ascend NPU.
 
-        This method returns the vLLM native flash attention backend path,
-        which serves as a fallback implementation.
+        This method returns the native Ascend attention backend that uses
+        torch_npu operators (npu_fused_infer_attention_score, etc.)
+        instead of flag_gems operators.
+
+        Uses vllm_fl's native Ascend implementation which directly calls
+        torch_npu operators without depending on vllm-ascend package.
 
         Args:
             use_mla: Whether to use Multi-head Latent Attention (MLA)
 
         Returns:
-            Fully qualified class path string (vLLM native backend)
+            Fully qualified class path string
         """
-        # Return vLLM's native flash attention backend as reference
-        from vllm.attention.backends.registry import AttentionBackendEnum
         if use_mla:
-            # vLLM native MLA backend
-            return AttentionBackendEnum.MLA.get_path()
-        return AttentionBackendEnum.FLASH_ATTN.get_path()
+            return "vllm_fl.dispatch.backends.vendor.ascend.impl.attention.AscendMLABackend"
+        return "vllm_fl.dispatch.backends.vendor.ascend.impl.attention.AscendAttentionBackend"

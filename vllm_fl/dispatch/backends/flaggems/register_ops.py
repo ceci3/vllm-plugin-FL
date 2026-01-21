@@ -64,6 +64,15 @@ def register_builtins(registry) -> None:
             vendor=None,
             priority=BackendPriority.DEFAULT,
         ),
+        # Attention Backend
+        OpImpl(
+            op_name="attention_backend",
+            impl_id="default.flaggems",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.attention_backend, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
     ]
 
     registry.register_many(impls)

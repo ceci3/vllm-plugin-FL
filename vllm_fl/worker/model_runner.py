@@ -615,9 +615,11 @@ class ModelRunnerFL(
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
         self.transfer_event = torch.Event()
+        # TODO(yxa): NPU uses int32, CUDA uses int64 for sampled token ids
+        sampled_ids_dtype = torch.int32 if current_platform.device_type == "npu" else torch.int64
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
-            dtype=torch.int64,
+            dtype=sampled_ids_dtype,
             device="cpu",
             pin_memory=self.pin_memory,
         )
@@ -3672,16 +3674,19 @@ class ModelRunnerFL(
                     self.model.set_aux_hidden_state_layers(aux_layers)
                 time_after_load = time.perf_counter()
             self.model_memory_usage = m.consumed_memory
-        except current_platform.torch_device_fn.OutOfMemoryError as e:
-            msg = (
-                "Failed to load model - not enough GPU memory. "
-                "Try lowering --gpu-memory-utilization to free memory for weights, "
-                "increasing --tensor-parallel-size, or using --quantization. "
-                "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
-                "for more tips."
-            )
-            combined_msg = f"{msg} (original error: {e})"
-            logger.error(combined_msg)
+        except Exception as e:
+            is_oom = 'out of memory' in str(e).lower()
+
+            if is_oom:
+                msg = (
+                    "Failed to load model - not enough device memory. "
+                    "Try lowering --gpu-memory-utilization to free memory for weights, "
+                    "increasing --tensor-parallel-size, or using --quantization. "
+                    "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+                    "for more tips."
+                )
+                combined_msg = f"{msg} (original error: {e})"
+                logger.error(combined_msg)
             raise e
         logger.info_once(
             "Model loading took %.4f GiB memory and %.6f seconds",

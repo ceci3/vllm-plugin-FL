@@ -10,9 +10,16 @@ from .reference import ReferenceBackend
 
 __all__ = ["Backend", "FlagGemsBackend", "ReferenceBackend"]
 
-# Add vendor backends here as they become available
-# try:
-#     from .vendor.my_vendor import MyVendorBackend
-#     __all__.append("MyVendorBackend")
-# except ImportError:
-#     MyVendorBackend = None
+# Try to import vendor backends
+try:
+    from .vendor.ascend import AscendBackend
+    __all__.append("AscendBackend")
+except ImportError:
+    AscendBackend = None
+
+# Add more vendor backends here as they become available
+try:
+    from .vendor.cuda import CudaBackend
+    __all__.append("CudaBackend")
+except ImportError:
+    CudaBackend = None

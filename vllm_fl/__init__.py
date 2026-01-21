@@ -1,8 +1,15 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
 
+
+import os
+
+
 def register():
     """Register the FL platform."""
 
+    multiproc_method = os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
+    if multiproc_method is None:
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     return "vllm_fl.platform.PlatformFL"
 
 

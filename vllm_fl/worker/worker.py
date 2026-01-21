@@ -7,9 +7,10 @@
 import copy
 import gc
 import os
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, nullcontext, contextmanager
 from types import NoneType
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast, Generator, Union
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -43,7 +44,7 @@ from vllm.profiler.wrapper import TorchProfilerWrapper
 
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.utils.mem_utils import GiB_bytes, MemorySnapshot, memory_profiling
+from vllm.utils.mem_utils import GiB_bytes#, MemorySnapshot, memory_profiling
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -61,6 +62,113 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm_fl.worker.model_runner import ModelRunnerFL
 
+@dataclass
+class MemorySnapshot:
+    """Platform-agnostic memory snapshot for FL worker."""
+    torch_peak: int = 0
+    free_memory: int = 0
+    total_memory: int = 0
+    cuda_memory: int = 0
+    torch_memory: int = 0
+    non_torch_memory: int = 0
+    timestamp: float = 0.0
+    auto_measure: bool = True
+
+    def __post_init__(self):
+        if self.auto_measure:
+            self.measure()
+
+    def measure(self):
+        import time
+        torch_device_fn = current_platform.torch_device_fn
+
+        # Get peak memory stats using platform-agnostic API
+        try:
+            self.torch_peak = torch_device_fn.memory_stats().get(
+                "allocated_bytes.all.peak", 0)
+        except (AttributeError, RuntimeError):
+            self.torch_peak = 0
+
+        # Get free and total memory using platform-agnostic API
+        self.free_memory, self.total_memory = torch_device_fn.mem_get_info()
+        self.cuda_memory = self.total_memory - self.free_memory
+
+        # Get torch reserved memory
+        try:
+            self.torch_memory = torch_device_fn.memory_reserved()
+        except (AttributeError, RuntimeError):
+            self.torch_memory = 0
+
+        self.non_torch_memory = self.cuda_memory - self.torch_memory
+        self.timestamp = time.time()
+
+    def __sub__(self, other: 'MemorySnapshot') -> 'MemorySnapshot':
+        result = MemorySnapshot(auto_measure=False)
+        result.torch_peak = self.torch_peak - other.torch_peak
+        result.free_memory = self.free_memory - other.free_memory
+        result.total_memory = self.total_memory
+        result.cuda_memory = self.cuda_memory - other.cuda_memory
+        result.torch_memory = self.torch_memory - other.torch_memory
+        result.non_torch_memory = self.non_torch_memory - other.non_torch_memory
+        result.timestamp = self.timestamp - other.timestamp
+        return result
+
+
+@dataclass
+class MemoryProfilingResult:
+    """Platform-agnostic memory profiling result."""
+    before_create: MemorySnapshot = None
+    before_profile: MemorySnapshot = None
+    after_profile: MemorySnapshot = None
+    weights_memory: int = 0
+    torch_peak_increase: int = 0
+    non_torch_increase: int = 0
+    non_kv_cache_memory: int = 0
+    profile_time: float = 0.0
+
+    def __post_init__(self):
+        if self.before_profile is None:
+            self.before_profile = MemorySnapshot(auto_measure=False)
+        if self.after_profile is None:
+            self.after_profile = MemorySnapshot(auto_measure=False)
+
+
+@contextmanager
+def memory_profiling_fl(
+        baseline_snapshot: MemorySnapshot,
+        weights_memory: int) -> Generator[MemoryProfilingResult, None, None]:
+    """Platform-agnostic memory profiling context manager for FL worker."""
+    gc.collect()
+    torch_device_fn = current_platform.torch_device_fn
+    torch_device_fn.empty_cache()
+
+    # Reset peak memory stats - platform agnostic
+    try:
+        torch_device_fn.reset_peak_memory_stats()
+    except (AttributeError, RuntimeError):
+        pass  # Some platforms may not support this
+
+    result = MemoryProfilingResult()
+    result.before_create = baseline_snapshot
+    result.weights_memory = weights_memory
+    result.before_profile.measure()
+
+    yield result
+
+    gc.collect()
+    torch_device_fn.empty_cache()
+
+    result.after_profile.measure()
+
+    diff_profile = result.after_profile - result.before_profile
+    diff_from_create = result.after_profile - result.before_create
+    result.torch_peak_increase = diff_profile.torch_peak
+    result.non_torch_increase = diff_from_create.non_torch_memory
+    result.profile_time = diff_profile.timestamp
+
+    non_torch_memory = result.non_torch_increase
+    peak_activation_memory = result.torch_peak_increase
+    result.non_kv_cache_memory = non_torch_memory + peak_activation_memory + result.weights_memory
 
 
 class WorkerFL(WorkerBase):
@@ -190,8 +298,10 @@ class WorkerFL(WorkerBase):
 
             # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
             self.local_rank += dp_local_rank * tp_pp_world_size
-            assert self.local_rank < torch.cuda.device_count(), (
+            device_count = current_platform.torch_device_fn.device_count() if current_platform.torch_device_fn.is_available() else 0
+            assert self.local_rank < device_count, (
                 f"DP adjusted local rank {self.local_rank} is out of bounds. "
+                f"Device count: {device_count}"
             )
             visible_device_count = (
                 current_platform.torch_device_fn.device_count() if current_platform.torch_device_fn.is_available() else 0
@@ -306,7 +416,7 @@ class WorkerFL(WorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling(
+        with memory_profiling_fl(
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:

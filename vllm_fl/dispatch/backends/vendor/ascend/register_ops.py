@@ -1,9 +1,9 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
 
 """
-Reference backend operator registrations.
+Ascend backend operator registrations.
 
-This module registers all REFERENCE (PyTorch) implementations.
+This module registers all VENDOR (Ascend) implementations.
 """
 
 from __future__ import annotations
@@ -26,52 +26,52 @@ def _bind_is_available(fn, is_available_fn):
 
 def register_builtins(registry) -> None:
     """
-    Register all PyTorch (REFERENCE) operator implementations.
+    Register all Ascend (VENDOR) operator implementations.
 
     Args:
         registry: Registry to register into
     """
-    from .reference import ReferenceBackend
+    from .ascend import AscendBackend
 
-    backend = ReferenceBackend()
+    backend = AscendBackend()
     is_avail = backend.is_available
 
     impls = [
         # Activation
         OpImpl(
             op_name="silu_and_mul",
-            impl_id="reference.torch",
-            kind=BackendImplKind.REFERENCE,
+            impl_id="vendor.ascend",
+            kind=BackendImplKind.VENDOR,
             fn=_bind_is_available(backend.silu_and_mul, is_avail),
-            vendor=None,
-            priority=BackendPriority.REFERENCE,
+            vendor="ascend",
+            priority=BackendPriority.VENDOR,
         ),
         # Normalization
         OpImpl(
             op_name="rmsnorm",
-            impl_id="reference.torch",
-            kind=BackendImplKind.REFERENCE,
+            impl_id="vendor.ascend",
+            kind=BackendImplKind.VENDOR,
             fn=_bind_is_available(backend.rmsnorm, is_avail),
-            vendor=None,
-            priority=BackendPriority.REFERENCE,
+            vendor="ascend",
+            priority=BackendPriority.VENDOR,
         ),
         # Rotary Embedding
         OpImpl(
             op_name="rotary_embedding",
-            impl_id="reference.torch",
-            kind=BackendImplKind.REFERENCE,
+            impl_id="vendor.ascend",
+            kind=BackendImplKind.VENDOR,
             fn=_bind_is_available(backend.rotary_embedding, is_avail),
-            vendor=None,
-            priority=BackendPriority.REFERENCE,
+            vendor="ascend",
+            priority=BackendPriority.VENDOR,
         ),
         # Attention Backend
         OpImpl(
             op_name="attention_backend",
-            impl_id="reference.torch",
-            kind=BackendImplKind.REFERENCE,
+            impl_id="vendor.ascend",
+            kind=BackendImplKind.VENDOR,
             fn=_bind_is_available(backend.attention_backend, is_avail),
-            vendor=None,
-            priority=BackendPriority.REFERENCE,
+            vendor="ascend",
+            priority=BackendPriority.VENDOR,
         ),
     ]
 

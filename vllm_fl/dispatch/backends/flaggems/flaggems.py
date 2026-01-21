@@ -115,3 +115,17 @@ class FlagGemsBackend(Backend):
             rotary_interleaved=rotary_interleaved,
             inplace=inplace,
         )
+
+    def attention_backend(self, use_mla: bool = False) -> str:
+        """
+        Get the attention backend class path for FlagGems.
+
+        Args:
+            use_mla: Whether to use Multi-head Latent Attention (MLA)
+
+        Returns:
+            Fully qualified class path string
+        """
+        if use_mla:
+            return "vllm_fl.dispatch.backends.flaggems.impl.mla.MLAFLBackend"
+        return "vllm_fl.dispatch.backends.flaggems.impl.attention.AttentionFLBackend"

@@ -6,6 +6,6 @@ from vllm.attention.backends.registry import (
 def register_attention():
     register_backend(
             backend=AttentionBackendEnum.TRITON_ATTN,
-            class_path="vllm_fl.attention.attention.AttentionFLBackend",
+            class_path="vllm_fl.dispatch.backends.flaggems.impl.attention.AttentionFLBackend",
             is_mamba=False,
         )

@@ -20,7 +20,7 @@ dispatch/
     ├── flaggems/            # FlagGems backend (DEFAULT, priority 150)
     ├── reference/           # Reference backend (PyTorch, priority 50)
     └── vendor/              # Vendor-specific backends (priority 100)
-        └── template/        # Template for creating new vendor backends
+        └── ascend/          # Example: Huawei Ascend backend
 ```
 
 ## Core Concepts

@@ -125,3 +125,23 @@ class VLLMFLBackendBase(ABC):
             Tuple of (embedded_query, embedded_key)
         """
         pass
+
+    # ==================== Attention Backend ====================
+
+    @abstractmethod
+    def attention_backend(self, use_mla: bool = False) -> str:
+        """
+        Get the attention backend class path for this platform.
+
+        This method returns the fully qualified class path of the attention
+        backend implementation suitable for the current hardware platform.
+
+        Args:
+            use_mla: Whether to use Multi-head Latent Attention (MLA)
+
+        Returns:
+            Fully qualified class path string, e.g.:
+            - "vllm_fl.dispatch.backends.vendor.ascend.impl.attention.AscendAttentionBackend"
+            - "vllm_fl.dispatch.backends.flaggems.impl.attention.AttentionFLBackend"
+        """
+        pass
