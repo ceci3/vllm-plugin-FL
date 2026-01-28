@@ -13,7 +13,7 @@ For video inference, install the video module:
 pip install vllm[video]
 ```
 
-### 1.2 Install vllm-plugin-FL(https://github.com/flagos-ai/vllm-plugin-FL)
+### 1.2 Install [vllm-plugin-FL](https://github.com/flagos-ai/vllm-plugin-FL)
 
 #### 1.2.1 Clone the repository:
 
