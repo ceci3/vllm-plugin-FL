@@ -32,3 +32,7 @@ def register_model():
         )
     except Exception as e:
         logger.error(f"Register model error: {str(e)}")
+
+    ModelRegistry.register_model(
+        "MiniCPMO",
+        "vllm_fl.models.minicpmo:MiniCPMO")
