@@ -34,19 +34,6 @@ logger = init_logger(__name__)
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
-@cache
-def _get_backend(
-    use_mla: bool,
-    device_info: Optional[DeviceInfo] = None,
-) -> list[str]:
-    """Get backend priorities with lazy import to avoid circular dependency."""
-    if use_mla:
-        raise NotImplementedError("NOT support mla now!")
-    else:
-        if fl_envs.USE_FLAGGEMS:
-            return [AttentionBackendEnum.TRITON_ATTN]
-        return [AttentionBackendEnum.FLASH_ATTN] 
-        
 
 class PlatformFL(Platform):
     _enum = PlatformEnum.OOT
