@@ -115,7 +115,7 @@ class CudaBackend(Backend):
         from vllm_fl.utils import use_flaggems_op
 
         if use_mla:
-            return AttentionBackendEnum.MLA.get_path()
+            return AttentionBackendEnum.FLASHMLA.get_path()
 
         # Default to FLASH_ATTN
         return AttentionBackendEnum.FLASH_ATTN.get_path()
