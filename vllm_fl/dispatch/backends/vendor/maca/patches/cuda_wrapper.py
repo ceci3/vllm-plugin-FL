@@ -20,7 +20,6 @@ import torch  # noqa
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.cuda_wrapper import logger
-from vllm.platforms import current_platform
 
 # === export types and functions from cudart to Python ===
 # for the original cudart definition, please check
@@ -157,9 +156,7 @@ class CudaRTLibrary:
             for func in CudaRTLibrary.exported_functions:
                 f = getattr(
                     self.lib,
-                    CudaRTLibrary.cuda_to_maca_mapping[func.name]
-                    if current_platform.is_out_of_tree()
-                    else func.name,
+                    CudaRTLibrary.cuda_to_maca_mapping[func.name],
                 )
                 f.restype = func.restype
                 f.argtypes = func.argtypes

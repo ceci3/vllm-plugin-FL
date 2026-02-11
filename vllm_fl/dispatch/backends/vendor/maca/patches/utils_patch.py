@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # 2026 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
+
+import vllm
+import vllm.utils.nccl
+
 import torch
 from vllm.utils.nccl import logger
 
@@ -25,3 +29,6 @@ def find_mccl_library() -> str:
             raise ValueError("MCCL only supports MACA backends.")
         logger.info_once("Found mccl from library %s", so_file)
     return so_file
+
+
+vllm.utils.nccl.find_nccl_library = find_mccl_library

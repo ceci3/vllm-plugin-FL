@@ -340,9 +340,9 @@ class PlatformFL(Platform):
             return False
 
     @classmethod
-    def try_apply_patches(cls) -> None:
+    def pre_register_and_update(
+        cls, parser = None
+    ) -> None:
         """Apply platform-specific patches."""
         if cls.device_info.vendor_name == "metax":
             import vllm_fl.dispatch.backends.vendor.maca.patches
-
-PlatformFL.try_apply_patches()

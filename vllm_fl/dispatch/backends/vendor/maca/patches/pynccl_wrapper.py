@@ -47,9 +47,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclUniqueId,
 )
 
-from vllm.platforms import current_platform
-from .mccl import find_mccl_library
-
+from .utils_patch import find_mccl_library
 
 class MCCLLibrary:
     exported_functions = [
@@ -275,10 +273,6 @@ class MCCLLibrary:
                                 func.name,
                                 so_file,
                             )
-                        if current_platform.is_rocm():
-                            # Having an exception here on ROCm platform is
-                            # not allowed during graph capturing
-                            continue
                     raise
             MCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = MCCLLibrary.path_to_dict_mapping[so_file]
