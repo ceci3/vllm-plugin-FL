@@ -42,7 +42,7 @@ class PlatformFL(Platform):
     ray_device_key: str = "flagos"
     dist_backend: str = "flagcx" if "FLAGCX_PATH" in os.environ else "nccl"
     ### TODO(lms): dispatch device_control_env_var
-    # device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+    device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
     def is_cuda_alike(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
@@ -115,7 +115,8 @@ class PlatformFL(Platform):
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
-        parallel_config.worker_cls = "vllm_fl.worker.worker.WorkerFL"
+        # parallel_config.worker_cls = "vllm_fl.worker.worker.WorkerFL"
+        parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.GPUWorker"
 
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
@@ -144,27 +145,6 @@ class PlatformFL(Platform):
 
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
-
-        compilation_config = vllm_config.compilation_config
-        if compilation_config.compile_sizes is None:
-            compilation_config.compile_sizes = []
-
-        if (
-            parallel_config.data_parallel_size > 1
-            and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            # TODO: Piecewise Cuda graph might be enabled
-            # if torch compile cache key issue fixed
-            # See https://github.com/vllm-project/vllm/pull/25093
-            logger.info(
-                "WideEP: Disabling CUDA Graphs since DeepEP high-throughput "
-                "kernels are optimized for prefill and are incompatible with "
-                "CUDA Graphs. "
-                "In order to use CUDA Graphs for decode-optimized workloads, "
-                "use --all2all-backend with another option, such as "
-                "deepep_low_latency, pplx, or allgather_reducescatter."
-            )
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # --------------------------------------------------------
         # maca specific config updates
