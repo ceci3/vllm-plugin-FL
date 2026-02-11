@@ -38,8 +38,7 @@ op_backends:
 
   # silu_and_mul: prioritize flaggems
   silu_and_mul:
-    - flagos
-    - vendor
+    - vendor:metax
     - reference
 
   # rotary_embedding: prioritize flaggems
@@ -49,7 +48,9 @@ op_backends:
     - reference
 
 # FlagOS operator blacklist
-# flagos_blacklist: []
+flagos_blacklist:
+  - silu_and_mul
 
 # OOT (Out-of-Tree) operator blacklist
-# oot_blacklist: []
+oot_blacklist:
+  - silu_and_mul
