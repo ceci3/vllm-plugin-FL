@@ -13,7 +13,7 @@ import torch
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 
-from vllm.platforms import Platform, PlatformEnum
+from vllm.platforms import Platform, PlatformEnum, logger
 from vllm.platforms.interface import DeviceCapability
 
 if TYPE_CHECKING:
@@ -35,7 +35,7 @@ _R = TypeVar("_R")
 class PlatformFL(Platform):
     _enum = PlatformEnum.OOT
     device_info = DeviceInfo()
-    device_name = device_info.device_type
+    device_name = "maca"
     device_type = device_info.device_type
     dispatch_key = device_info.dispatch_key
     torch_device_fn = device_info.torch_device_fn
@@ -50,7 +50,9 @@ class PlatformFL(Platform):
 
     def is_cuda(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
-        return self.device_type == "cuda"
+        return (
+            self.device_type == "cuda" and 
+            PlatformFL.device_info.vendor_name == "cuda")
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -92,6 +94,21 @@ class PlatformFL(Platform):
         if cls.device_type in ["cuda", "xpu", "npu"]:
             return True
         return False
+    
+    @classmethod
+    def import_kernels(cls) -> None:
+        """Import device-specific kernels."""
+        logger.info(f"PlatformFL.device_info.vendor_name: {PlatformFL.device_info.vendor_name}")
+        if PlatformFL.device_info.vendor_name == "metax":
+            try:
+                import mcoplib._C  # noqa: F401
+            except ImportError as e:
+                logger.warning("Failed to import mcoplib._C")
+
+            try:
+                import mcoplib._moe_C  # noqa: F401
+            except ImportError as e:
+                logger.warning("Failed to import mcoplib._moe_C")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -149,6 +166,17 @@ class PlatformFL(Platform):
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
+        # --------------------------------------------------------
+        # maca specific config updates
+        if cls.device_info.vendor_name == "metax":
+            if model_config is not None:
+                    model_config.disable_cascade_attn = True
+            if attention_config := vllm_config.attention_config:
+                attention_config.use_cudnn_prefill = False
+                attention_config.use_trtllm_ragged_deepseek_prefill = False
+                attention_config.use_trtllm_attention = False
+                attention_config.disable_flashinfer_prefill = True
+    
     @classmethod
     def get_attn_backend_cls(
         cls,
@@ -168,6 +196,7 @@ class PlatformFL(Platform):
             backend_path,
             scope="local",
         )
+        logger.info("Using attention backend via dispatch (use_mla=%s): %s" % (use_mla, backend_path))
         return backend_path
 
     @classmethod
@@ -309,3 +338,11 @@ class PlatformFL(Platform):
             return True
         except:
             return False
+
+    @classmethod
+    def try_apply_patches(cls) -> None:
+        """Apply platform-specific patches."""
+        if cls.device_info.vendor_name == "metax":
+            import vllm_fl.dispatch.backends.vendor.maca.patches
+
+PlatformFL.try_apply_patches()

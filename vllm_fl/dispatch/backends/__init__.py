@@ -23,3 +23,10 @@ try:
     __all__.append("CudaBackend")
 except ImportError:
     CudaBackend = None
+
+# Import MACA backend
+try:
+    from .vendor.maca import MacaBackend
+    __all__.append("MacaBackend")
+except ImportError:
+    pass

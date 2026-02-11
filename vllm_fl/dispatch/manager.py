@@ -154,7 +154,8 @@ class OpManager:
             snap = self._registry.snapshot()
             total_ops = len(snap.impls_by_op)
             total_impls = sum(len(impls) for impls in snap.impls_by_op.values())
-
+            import pprint
+            pprint.pprint(snap.impls_by_op)
             logger.info(f"OpManager initialized: {total_ops} ops with {total_impls} implementations")
 
             # Group implementations by kind for summary
@@ -255,7 +256,7 @@ class OpManager:
 
         # Filter by vendor policy
         candidates = [c for c in candidates if self._matches_vendor_filters(c, policy)]
-
+        logger.info(f"Candidates after vendor filter for op '{op_name}': {[c.impl_id for c in candidates]}")
         # Filter by availability
         available: list[OpImpl] = []
         for c in candidates:

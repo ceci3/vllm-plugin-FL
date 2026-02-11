@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, Optional
+from vllm.platforms import current_platform
 
 import yaml
 
@@ -51,7 +52,7 @@ def get_platform_name() -> str:
         if hasattr(torch, 'npu') and torch.npu.is_available():
             return 'ascend'
         if torch.cuda.is_available():
-            return 'cuda'
+            return current_platform.device_name
     except ImportError:
         pass
 

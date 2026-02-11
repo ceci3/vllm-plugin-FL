@@ -33,6 +33,13 @@ try:
 except ImportError:
     pass
 
+# Import MACA backend
+try:
+    from .maca import MacaBackend
+    __all__.append("MacaBackend")
+except ImportError:
+    pass
+
 # Add more vendor backends here as they become available:
 # try:
 #     from .rocm import RocmBackend
