@@ -146,6 +146,27 @@ class PlatformFL(Platform):
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
 
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.compile_sizes is None:
+            compilation_config.compile_sizes = []
+
+        if (
+            parallel_config.data_parallel_size > 1
+            and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            # TODO: Piecewise Cuda graph might be enabled
+            # if torch compile cache key issue fixed
+            # See https://github.com/vllm-project/vllm/pull/25093
+            logger.info(
+                "WideEP: Disabling CUDA Graphs since DeepEP high-throughput "
+                "kernels are optimized for prefill and are incompatible with "
+                "CUDA Graphs. "
+                "In order to use CUDA Graphs for decode-optimized workloads, "
+                "use --all2all-backend with another option, such as "
+                "deepep_low_latency, pplx, or allgather_reducescatter."
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         # --------------------------------------------------------
         # maca specific config updates
         if cls.device_info.vendor_name == "metax":
@@ -318,11 +339,3 @@ class PlatformFL(Platform):
             return True
         except:
             return False
-
-    @classmethod
-    def pre_register_and_update(
-        cls, parser = None
-    ) -> None:
-        """Apply platform-specific patches."""
-        if cls.device_info.vendor_name == "metax":
-            import vllm_fl.dispatch.backends.vendor.maca.patches

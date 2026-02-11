@@ -28,7 +28,7 @@ strict: false
 op_backends:
   # attention_backend: prioritize flaggems (Triton attention)
   attention_backend:
-    - vendor:metax
+    - vendor
 
   # rms_norm: prioritize flaggems (Triton)
   rms_norm:
