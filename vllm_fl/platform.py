@@ -116,7 +116,7 @@ class PlatformFL(Platform):
         model_config = vllm_config.model_config
 
         # parallel_config.worker_cls = "vllm_fl.worker.worker.WorkerFL"
-        parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.GPUWorker"
+        parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
