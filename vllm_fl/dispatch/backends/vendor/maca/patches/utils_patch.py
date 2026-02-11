@@ -5,8 +5,6 @@ import vllm
 import vllm.utils.nccl
 
 import torch
-from vllm.utils.nccl import logger
-
 
 def find_mccl_library() -> str:
     """
@@ -18,16 +16,10 @@ def find_mccl_library() -> str:
     so_file = None
 
     # manually load the nccl library
-    if so_file:
-        logger.info(
-            "Found mccl from environment variable VLLM_NCCL_SO_PATH=%s", so_file
-        )
+    if torch.version.cuda is not None:
+        so_file = "libmccl.so"
     else:
-        if torch.version.cuda is not None:
-            so_file = "libmccl.so"
-        else:
-            raise ValueError("MCCL only supports MACA backends.")
-        logger.info_once("Found mccl from library %s", so_file)
+        raise ValueError("MCCL only supports MACA backends.")
     return so_file
 
 

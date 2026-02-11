@@ -48,3 +48,5 @@ def register_model():
         )
     except Exception as e:
         logger.error(f"Register KimiK25 model error: {str(e)}")
+
+    import vllm_fl.dispatch.backends.vendor.maca.patches
