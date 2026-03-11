@@ -1,9 +1,9 @@
 # Copyright (c) 2026 BAAI. All rights reserved.
 
 """
-CUDA backend implementation.
+METAX backend implementation.
 
-This backend provides operator implementations for NVIDIA CUDA GPUs.
+This backend provides operator implementations for METAX GPUs.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from vllm_fl.dispatch.backends.base import Backend
 
 from vllm.attention.backends.registry import AttentionBackendEnum, register_backend
 
+
 # Register attention backends for MACA
 def register_attention_backends():
     register_backend(
@@ -27,12 +28,13 @@ def register_attention_backends():
         class_path="vllm_fl.dispatch.backends.vendor.maca.impl.attention.flash_attn.MacaFlashAttentionBackend",
     )
 
+
 class MacaBackend(Backend):
     """
-    CUDA backend for operator implementations.
+    METAX backend for operator implementations.
 
-    This backend uses CUDA libraries to provide high-performance
-    operator implementations for NVIDIA GPUs.
+    This backend uses MACA libraries to provide high-performance
+    operator implementations for METAX GPUs.
     """
 
     _available: bool | None = None
@@ -60,15 +62,37 @@ class MacaBackend(Backend):
 
     # ==================== Operator Implementations ====================
 
-    def silu_and_mul(self, x: torch.Tensor) -> torch.Tensor:
+    def silu_and_mul(self, x: torch.Tensor, obj=None) -> torch.Tensor:
         """
         SiLU activation followed by element-wise multiplication.
 
         Uses vLLM's native CUDA implementation.
+        Args:
+            obj: The calling obj (for interface consistency)
+            x: Input tensor of shape [..., 2*d]
+
+        Returns:
+            Output tensor of shape [..., d]
         """
         from .impl.activation import silu_and_mul_maca
 
-        return silu_and_mul_maca(x)
+        return silu_and_mul_maca(x, obj=obj)
+
+    def gelu_and_mul(self, x: torch.Tensor, obj=None) -> torch.Tensor:
+        """
+        GELU activation followed by element-wise multiplication.
+
+        Uses vLLM's native CUDA implementation.
+
+        Args:
+            obj: The calling obj (for interface consistency)
+            x: Input tensor of shape [..., 2*d]
+
+        Returns:
+            Output tensor of shape [..., d]
+        """
+
+        return gelu_and_mul_maca(x, obj=obj)
 
     def rms_norm(
         self,
@@ -82,7 +106,7 @@ class MacaBackend(Backend):
         """
         from .impl.layernorm import rms_norm_maca
 
-        return rms_norm_maca(x, residual, weight, epsilon)
+        return rms_norm_maca(x, residual, weight, epsilon, obj=obj)
 
     def rotary_embedding(
         self,
@@ -93,6 +117,7 @@ class MacaBackend(Backend):
         position_ids: torch.Tensor,
         rotary_interleaved: bool = False,
         inplace: bool = True,
+        obj=None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Apply rotary position embedding using vLLM's CUDA implementation.
@@ -124,7 +149,6 @@ class MacaBackend(Backend):
             Fully qualified class path string
         """
         from vllm.attention.backends.registry import AttentionBackendEnum
-        from vllm_fl.utils import use_flaggems_op
 
         # register before selection
         register_attention_backends()
@@ -134,3 +158,17 @@ class MacaBackend(Backend):
 
         # Default to FLASH_ATTN
         return AttentionBackendEnum.FLASH_ATTN.get_path()
+
+    def topk_softmax(
+        self,
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize=False,
+    ):
+        from .impl.fused_moe import topk_softmax_maca
+
+        return topk_softmax_maca(
+            topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
+        )

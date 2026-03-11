@@ -9,7 +9,6 @@ from typing import ClassVar
 import numpy as np
 import torch
 
-from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,

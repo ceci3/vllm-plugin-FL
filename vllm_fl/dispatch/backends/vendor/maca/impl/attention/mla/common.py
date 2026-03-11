@@ -195,7 +195,6 @@ from enum import Enum
 from typing import ClassVar, Generic, TypeVar
 
 import torch
-from tqdm import tqdm
 
 from vllm import _custom_ops as ops
 from vllm import envs
@@ -213,8 +212,7 @@ from vllm.attention.ops.common import cp_lse_ag_out_rs
 from ..ops.merge_attn_states import merge_attn_states
 from ..utils.fa_utils import get_flash_attn_version
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
-from vllm.logger import init_logger
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )

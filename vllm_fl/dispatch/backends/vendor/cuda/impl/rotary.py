@@ -17,6 +17,7 @@ def rotary_embedding_cuda(
     position_ids: torch.Tensor,
     rotary_interleaved: bool = False,
     inplace: bool = True,
+    obj=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary position embedding using CUDA.
@@ -24,6 +25,7 @@ def rotary_embedding_cuda(
     Uses vLLM's optimized CUDA kernel when available.
 
     Args:
+        obj: The calling obj (for interface consistency)
         query: Query tensor
         key: Key tensor
         cos: Cosine cache

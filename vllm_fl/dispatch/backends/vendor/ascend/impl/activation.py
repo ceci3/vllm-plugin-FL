@@ -9,12 +9,13 @@ from __future__ import annotations
 import torch
 
 
-def silu_and_mul_ascend(x: torch.Tensor) -> torch.Tensor:
+def silu_and_mul_ascend(x: torch.Tensor, obj=None) -> torch.Tensor:
     """
     SiLU activation followed by element-wise multiplication using Ascend NPU.
 
     Args:
         x: Input tensor of shape [..., 2*d]
+        obj: The calling obj (optional, for interface consistency)
 
     Returns:
         Output tensor of shape [..., d]

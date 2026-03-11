@@ -71,6 +71,7 @@ def get_flag_gems_whitelist_blacklist() -> Tuple[
     # Priority 3: Blacklist from platform config
     try:
         from vllm_fl.dispatch.config import get_flagos_blacklist
+
         config_blacklist = get_flagos_blacklist()
         if config_blacklist:
             blacklist = config_blacklist
@@ -180,17 +181,18 @@ def get_flaggems_all_ops() -> list[str]:
     Get all FlagGems operator names from flag_gems._FULL_CONFIG.
     """
     try:
-        pass
+        # _FULL_CONFIG is a tuple of (op_name, function, ...) tuples
+        # Some entries have 2 elements, some have 3
+        ops = [entry[0] for entry in flag_gems._FULL_CONFIG]
+        return ops
     except Exception:
         return []
-    ops = flag_gems.all_registered_ops()
-
-    return ops
 
 
 # OOT operator names as registered in custom_ops.py (op_name lowercase)
 OOT_OP_NAMES = [
     "silu_and_mul",
+    "gelu_and_mul",
     "rms_norm",
     "rotary_embedding",
     "fused_moe",
@@ -238,7 +240,10 @@ def get_oot_blacklist() -> Optional[list[str]]:
 
     # Priority 3: Blacklist from platform config
     try:
-        from vllm_fl.dispatch.config import get_oot_blacklist as config_get_oot_blacklist
+        from vllm_fl.dispatch.config import (
+            get_oot_blacklist as config_get_oot_blacklist,
+        )
+
         config_blacklist = config_get_oot_blacklist()
         if config_blacklist:
             return config_blacklist

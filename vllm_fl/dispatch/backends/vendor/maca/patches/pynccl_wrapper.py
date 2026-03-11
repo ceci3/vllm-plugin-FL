@@ -33,7 +33,6 @@ import ctypes
 import platform
 from typing import Any
 
-import vllm
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     Function,
     buffer_type,
@@ -48,6 +47,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 )
 
 from .utils_patch import find_mccl_library
+
 
 class MCCLLibrary:
     exported_functions = [

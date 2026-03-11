@@ -6,6 +6,7 @@ import vllm.utils.nccl
 
 import torch
 
+
 def find_mccl_library() -> str:
     """
     We either use the library file specified by the `VLLM_NCCL_SO_PATH`

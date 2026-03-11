@@ -9,7 +9,7 @@ from __future__ import annotations
 import torch
 
 
-def silu_and_mul_cuda(x: torch.Tensor) -> torch.Tensor:
+def silu_and_mul_cuda(x: torch.Tensor, obj=None) -> torch.Tensor:
     """
     SiLU activation followed by element-wise multiplication using CUDA.
 
@@ -17,6 +17,7 @@ def silu_and_mul_cuda(x: torch.Tensor) -> torch.Tensor:
 
     Args:
         x: Input tensor of shape [..., 2*d]
+        obj: The calling obj (optional, for interface consistency)
 
     Returns:
         Output tensor of shape [..., d]
@@ -26,4 +27,27 @@ def silu_and_mul_cuda(x: torch.Tensor) -> torch.Tensor:
     d = x.shape[-1] // 2
     out = torch.empty(*x.shape[:-1], d, dtype=x.dtype, device=x.device)
     vllm_silu_and_mul(out, x)
+    return out
+
+
+def gelu_and_mul_cuda(x: torch.Tensor, obj=None) -> torch.Tensor:
+    """
+    GELU activation followed by element-wise multiplication using CUDA.
+
+    Uses vLLM's optimized CUDA kernel.
+
+    Args:
+        x: Input tensor of shape [..., 2*d]
+        obj: The calling obj (optional, for interface consistency)
+
+    Returns:
+        Output tensor of shape [..., d]
+    """
+    approximate = getattr(obj, "approximate", "none") if obj is not None else "none"
+    d = x.shape[-1] // 2
+    out = torch.empty(*x.shape[:-1], d, dtype=x.dtype, device=x.device)
+    if approximate == "tanh":
+        torch.ops._C.gelu_tanh_and_mul(out, x)
+    else:
+        torch.ops._C.gelu_and_mul(out, x)
     return out

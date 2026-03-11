@@ -42,11 +42,12 @@ class FlagGemsBackend(Backend):
 
     # ==================== Operator Implementations ====================
 
-    def silu_and_mul(self, x: torch.Tensor) -> torch.Tensor:
+    def silu_and_mul(self, x: torch.Tensor, obj=None) -> torch.Tensor:
         """
         SiLU activation followed by element-wise multiplication.
 
         Args:
+            obj: The calling obj (for interface consistency)
             x: Input tensor of shape [..., 2*d]
 
         Returns:
@@ -54,30 +55,43 @@ class FlagGemsBackend(Backend):
         """
         from .impl.activation import silu_and_mul_flaggems
 
-        return silu_and_mul_flaggems(x)
+        return silu_and_mul_flaggems(x, obj=obj)
+
+    def gelu_and_mul(self, x: torch.Tensor, obj=None) -> torch.Tensor:
+        """
+        GELU activation followed by element-wise multiplication.
+
+        Args:
+            obj: The calling obj (for interface consistency)
+            x: Input tensor of shape [..., 2*d]
+
+        Returns:
+            Output tensor of shape [..., d]
+        """
+        from .impl.activation import gelu_and_mul_flaggems
+
+        return gelu_and_mul_flaggems(x, obj=obj)
 
     def rms_norm(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        weight: torch.Tensor,
-        epsilon: float,
+        residual: Optional[torch.Tensor] = None,
+        obj=None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
         RMS normalization.
 
         Args:
+            obj: The calling obj (e.g., RMSNorm layer)
             x: Input tensor
             residual: Optional residual tensor
-            weight: Normalization weight
-            epsilon: Small constant for numerical stability
 
         Returns:
             Normalized tensor, or tuple of (normalized, residual) if residual is provided
         """
         from .impl.normalization import rms_norm_flaggems
 
-        return rms_norm_flaggems(x, residual, weight, epsilon)
+        return rms_norm_flaggems(x, residual, obj=obj)
 
     def rotary_embedding(
         self,
@@ -88,11 +102,13 @@ class FlagGemsBackend(Backend):
         position_ids: torch.Tensor,
         rotary_interleaved: bool = False,
         inplace: bool = True,
+        obj=None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Apply rotary position embedding.
 
         Args:
+            obj: The calling obj (for interface consistency)
             query: Query tensor
             key: Key tensor
             cos: Cosine cache
@@ -114,6 +130,7 @@ class FlagGemsBackend(Backend):
             position_ids,
             rotary_interleaved=rotary_interleaved,
             inplace=inplace,
+            obj=obj,
         )
 
     def attention_backend(self, use_mla: bool = False) -> str:
@@ -139,3 +156,42 @@ class FlagGemsBackend(Backend):
             raise NotImplementedError("NOT support mla now!")
 
         return AttentionBackendEnum.TRITON_ATTN.get_path()
+
+    def moe_align_block_size(
+        self,
+        topk_ids: torch.Tensor,
+        block_size: int,
+        num_experts: int,
+        expert_map: Optional[torch.Tensor] = None,
+        pad_sorted_ids: bool = False,
+        ignore_invalid_experts: bool = False,
+    ):
+        from .impl.fused_moe import moe_align_block_size_flaggems
+
+        return moe_align_block_size_flaggems(
+            topk_ids,
+            block_size,
+            num_experts,
+            expert_map,
+            pad_sorted_ids,
+            ignore_invalid_experts,
+        )
+
+    def moe_sum(self, inp, out):
+        from .impl.fused_moe import moe_sum_flaggems
+
+        moe_sum_flaggems(inp, out)
+
+    def topk_softmax(
+        self,
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize=False,
+    ):
+        from .impl.fused_moe import topk_softmax_flaggems
+
+        return topk_softmax_flaggems(
+            topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
+        )

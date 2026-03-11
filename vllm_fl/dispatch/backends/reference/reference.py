@@ -44,11 +44,12 @@ class ReferenceBackend(Backend):
 
     # ==================== Operator Implementations ====================
 
-    def silu_and_mul(self, x: torch.Tensor) -> torch.Tensor:
+    def silu_and_mul(self, x: torch.Tensor, obj=None) -> torch.Tensor:
         """
         SiLU activation followed by element-wise multiplication.
 
         Args:
+            obj: The calling obj (for interface consistency)
             x: Input tensor of shape [..., 2*d]
 
         Returns:
@@ -56,30 +57,42 @@ class ReferenceBackend(Backend):
         """
         from .impl.activation import silu_and_mul_torch
 
-        return silu_and_mul_torch(x)
+        return silu_and_mul_torch(x, obj=obj)
+
+    def gelu_and_mul(self, x: torch.Tensor, obj=None) -> torch.Tensor:
+        """
+        GELU activation followed by element-wise multiplication.
+
+        Args:
+            obj: The calling obj (for interface consistency)
+            x: Input tensor of shape [..., 2*d]
+
+        Returns:
+            Output tensor of shape [..., d]
+        """
+        from .impl.activation import gelu_and_mul_torch
+
+        return gelu_and_mul_torch(x, obj=obj)
 
     def rms_norm(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        weight: torch.Tensor,
-        epsilon: float,
+        residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
         RMS normalization.
 
         Args:
+            obj: The calling obj (e.g., RMSNorm layer)
             x: Input tensor
             residual: Optional residual tensor
-            weight: Normalization weight
-            epsilon: Small constant for numerical stability
 
         Returns:
             Normalized tensor, or tuple of (normalized, residual) if residual is provided
         """
         from .impl.normalization import rms_norm_torch
 
-        return rms_norm_torch(x, residual, weight, epsilon)
+        return rms_norm_torch(x, residual, obj=obj)
 
     def rotary_embedding(
         self,
@@ -90,11 +103,13 @@ class ReferenceBackend(Backend):
         position_ids: torch.Tensor,
         rotary_interleaved: bool = False,
         inplace: bool = True,
+        obj=None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Apply rotary position embedding.
 
         Args:
+            obj: The calling obj (for interface consistency)
             query: Query tensor
             key: Key tensor
             cos: Cosine cache

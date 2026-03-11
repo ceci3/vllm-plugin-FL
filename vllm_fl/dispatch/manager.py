@@ -26,6 +26,7 @@ _DISPATCH_DEBUG = os.getenv("VLLM_FL_DISPATCH_DEBUG", "0") == "1"
 @dataclass
 class _OpManagerState:
     """Internal state for OpManager."""
+
     init_pid: int = -1
     initialized: bool = False
     policy_epoch: int = 0
@@ -48,7 +49,9 @@ class OpManager:
         self._state = _OpManagerState()
         self._dispatch_cache: Dict[Tuple[str, str, int], Callable] = {}
         self._called_ops: Dict[str, str] = {}  # Map op_name -> last_used_impl_id
-        self._failed_impls: Dict[str, Set[str]] = {}  # Map op_name -> set of failed impl_ids
+        self._failed_impls: Dict[
+            str, Set[str]
+        ] = {}  # Map op_name -> set of failed impl_ids
 
         # Register at_fork handler for multi-process safety
         try:
@@ -144,6 +147,7 @@ class OpManager:
 
             # Register built-in operators
             from . import builtin_ops
+
             builtin_ops.register_builtins(self._registry)
 
             # Invalidate cache
@@ -154,17 +158,33 @@ class OpManager:
             snap = self._registry.snapshot()
             total_ops = len(snap.impls_by_op)
             total_impls = sum(len(impls) for impls in snap.impls_by_op.values())
-            logger.info(f"OpManager initialized: {total_ops} ops with {total_impls} implementations")
+            logger.info(
+                f"OpManager initialized: {total_ops} ops with {total_impls} implementations"
+            )
 
             # Group implementations by kind for summary
-            vendor_count = sum(1 for impls in snap.impls_by_op.values()
-                             for impl in impls if impl.kind == BackendImplKind.VENDOR)
-            reference_count = sum(1 for impls in snap.impls_by_op.values()
-                                for impl in impls if impl.kind == BackendImplKind.REFERENCE)
-            default_count = sum(1 for impls in snap.impls_by_op.values()
-                              for impl in impls if impl.kind == BackendImplKind.DEFAULT)
+            vendor_count = sum(
+                1
+                for impls in snap.impls_by_op.values()
+                for impl in impls
+                if impl.kind == BackendImplKind.VENDOR
+            )
+            reference_count = sum(
+                1
+                for impls in snap.impls_by_op.values()
+                for impl in impls
+                if impl.kind == BackendImplKind.REFERENCE
+            )
+            default_count = sum(
+                1
+                for impls in snap.impls_by_op.values()
+                for impl in impls
+                if impl.kind == BackendImplKind.DEFAULT
+            )
 
-            logger.debug(f"  Vendor: {vendor_count}, Default: {default_count}, Reference: {reference_count}")
+            logger.debug(
+                f"  Vendor: {vendor_count}, Default: {default_count}, Reference: {reference_count}"
+            )
 
             # Print detailed operator list if debug is enabled
             if _DISPATCH_DEBUG:
@@ -174,9 +194,9 @@ class OpManager:
         """Print detailed list of registered operators and their implementations."""
         snap = self._registry.snapshot()
 
-        logger.info("\n" + "="*80)
+        logger.info("\n" + "=" * 80)
         logger.info("VLLM-FL Dispatch: Registered Operators")
-        logger.info("="*80)
+        logger.info("=" * 80)
 
         # Sort operators by name for consistent output
         sorted_ops = sorted(snap.impls_by_op.items())
@@ -184,14 +204,18 @@ class OpManager:
         for op_name, impls in sorted_ops:
             logger.info(f"\n[Operator: {op_name}]")
             # Sort implementations by priority (highest first)
-            sorted_impls = sorted(impls, key=lambda x: (x.priority, x.impl_id), reverse=True)
+            sorted_impls = sorted(
+                impls, key=lambda x: (x.priority, x.impl_id), reverse=True
+            )
 
             for impl in sorted_impls:
                 available = "✓" if impl.is_available() else "✗"
                 vendor_info = f", vendor={impl.vendor}" if impl.vendor else ""
-                logger.info(f"  {available} {impl.impl_id} (kind={impl.kind.value}, priority={impl.priority}{vendor_info})")
+                logger.info(
+                    f"  {available} {impl.impl_id} (kind={impl.kind.value}, priority={impl.priority}{vendor_info})"
+                )
 
-        logger.info("\n" + "="*80 + "\n")
+        logger.info("\n" + "=" * 80 + "\n")
 
     def _matches_vendor_filters(self, impl: OpImpl, policy: SelectionPolicy) -> bool:
         """Check if implementation matches policy vendor filters."""
@@ -254,7 +278,9 @@ class OpManager:
 
         # Filter by vendor policy
         candidates = [c for c in candidates if self._matches_vendor_filters(c, policy)]
-        logger.info(f"Candidates after vendor filter for op '{op_name}': {[c.impl_id for c in candidates]}")
+        logger.info(
+            f"Candidates after vendor filter for op '{op_name}': {[c.impl_id for c in candidates]}"
+        )
         # Filter by availability
         available: list[OpImpl] = []
         for c in candidates:
@@ -262,7 +288,9 @@ class OpManager:
                 if c.is_available():
                     available.append(c)
                 else:
-                    logger.debug(f"Implementation {c.impl_id} not available for op={op_name}")
+                    logger.debug(
+                        f"Implementation {c.impl_id} not available for op={op_name}"
+                    )
             except Exception as e:
                 logger.warning(f"Error checking availability of {c.impl_id}: {e}")
                 continue
@@ -307,7 +335,9 @@ class OpManager:
         # Print selected backend if debug is enabled
         if _DISPATCH_DEBUG:
             vendor_info = f", vendor={chosen.vendor}" if chosen.vendor else ""
-            logger.debug(f"[DISPATCH] Op '{op_name}' -> '{chosen.impl_id}' (kind={chosen.kind.value}{vendor_info})")
+            logger.debug(
+                f"[DISPATCH] Op '{op_name}' -> '{chosen.impl_id}' (kind={chosen.kind.value}{vendor_info})"
+            )
 
         return chosen.fn
 
@@ -346,7 +376,9 @@ class OpManager:
                 if c.is_available():
                     available.append(c)
                 else:
-                    logger.debug(f"Implementation {c.impl_id} not available for op={op_name}")
+                    logger.debug(
+                        f"Implementation {c.impl_id} not available for op={op_name}"
+                    )
             except Exception as e:
                 logger.warning(f"Error checking availability of {c.impl_id}: {e}")
                 continue

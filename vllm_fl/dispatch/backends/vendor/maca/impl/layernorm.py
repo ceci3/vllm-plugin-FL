@@ -4,19 +4,19 @@ from vllm.model_executor.layers.layernorm import rms_norm, fused_add_rms_norm
 
 import torch
 
+
 def rms_norm_maca(
     x: torch.Tensor,
     residual: torch.Tensor | None,
     weight: torch.Tensor,
     epsilon: float,
+    obj=None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     RMS normalization using Maca's CUDA implementation.
     """
     add_residual = residual is not None
     if add_residual:
-        return fused_add_rms_norm(
-            x, residual, weight, epsilon
-        )
+        return fused_add_rms_norm(x, residual, obj.weight, obj.epsilon)
     else:
-        return rms_norm(x, weight, epsilon)
+        return rms_norm(x, obj.weight, obj.epsilon)

@@ -31,14 +31,29 @@ class CudaBackend(Backend):
 
     @property
     def vendor(self) -> Optional[str]:
-        return "cuda"
+        return "nvidia"
 
     def is_available(self) -> bool:
-        """Check if CUDA hardware and libraries are available."""
+        """
+        Check if CUDA hardware and libraries are available.
+
+        This method uses the platform's vendor information from FlagGems
+        to determine if the device is a real NVIDIA GPU, decoupling from
+        CUDA-alike devices (MACA, MUSA, etc.) which have their own vendor names.
+        """
         if CudaBackend._available is None:
             try:
                 # Check if CUDA device is available
-                if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
+                    CudaBackend._available = False
+                    return False
+
+                from vllm.platforms import current_platform
+
+                if (
+                    hasattr(current_platform, "device_name")
+                    and current_platform.device_name == "nvidia"
+                ):
                     CudaBackend._available = True
                 else:
                     CudaBackend._available = False
@@ -48,29 +63,59 @@ class CudaBackend(Backend):
 
     # ==================== Operator Implementations ====================
 
-    def silu_and_mul(self, x: torch.Tensor) -> torch.Tensor:
+    def silu_and_mul(self, x: torch.Tensor, obj=None) -> torch.Tensor:
         """
         SiLU activation followed by element-wise multiplication.
 
         Uses vLLM's native CUDA implementation.
+
+        Args:
+            obj: The calling obj (for interface consistency)
+            x: Input tensor of shape [..., 2*d]
+
+        Returns:
+            Output tensor of shape [..., d]
         """
         from .impl.activation import silu_and_mul_cuda
 
-        return silu_and_mul_cuda(x)
+        return silu_and_mul_cuda(x, obj=obj)
+
+    def gelu_and_mul(self, x: torch.Tensor, obj=None) -> torch.Tensor:
+        """
+        GELU activation followed by element-wise multiplication.
+
+        Uses vLLM's native CUDA implementation.
+
+        Args:
+            obj: The calling obj (for interface consistency)
+            x: Input tensor of shape [..., 2*d]
+
+        Returns:
+            Output tensor of shape [..., d]
+        """
+        from .impl.activation import gelu_and_mul_cuda
+
+        return gelu_and_mul_cuda(x, obj=obj)
 
     def rms_norm(
         self,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        weight: torch.Tensor,
-        epsilon: float,
+        residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
         RMS normalization using vLLM's CUDA implementation.
+
+        Args:
+            obj: The calling obj (e.g., RMSNorm layer)
+            x: Input tensor
+            residual: Optional residual tensor
+
+        Returns:
+            Normalized tensor, or tuple of (normalized, residual) if residual is provided
         """
         from .impl.normalization import rms_norm_cuda
 
-        return rms_norm_cuda(x, residual, weight, epsilon)
+        return rms_norm_cuda(x, residual, obj=obj)
 
     def rotary_embedding(
         self,
@@ -81,9 +126,23 @@ class CudaBackend(Backend):
         position_ids: torch.Tensor,
         rotary_interleaved: bool = False,
         inplace: bool = True,
+        obj=None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Apply rotary position embedding using vLLM's CUDA implementation.
+
+        Args:
+            obj: The calling obj (for interface consistency)
+            query: Query tensor
+            key: Key tensor
+            cos: Cosine cache
+            sin: Sine cache
+            position_ids: Position indices
+            rotary_interleaved: Whether to use interleaved rotary
+            inplace: Whether to modify tensors in-place
+
+        Returns:
+            Tuple of (embedded_query, embedded_key)
         """
         from .impl.rotary import rotary_embedding_cuda
 
@@ -112,10 +171,48 @@ class CudaBackend(Backend):
             Fully qualified class path string
         """
         from vllm.attention.backends.registry import AttentionBackendEnum
-        from vllm_fl.utils import use_flaggems_op
 
         if use_mla:
             return AttentionBackendEnum.FLASHMLA.get_path()
 
         # Default to FLASH_ATTN
         return AttentionBackendEnum.FLASH_ATTN.get_path()
+
+    def moe_align_block_size(
+        self,
+        topk_ids: torch.Tensor,
+        block_size: int,
+        num_experts: int,
+        expert_map: Optional[torch.Tensor] = None,
+        pad_sorted_ids: bool = False,
+        ignore_invalid_experts: bool = False,
+    ):
+        from .impl.fused_moe import moe_align_block_size_cuda
+
+        return moe_align_block_size_cuda(
+            topk_ids,
+            block_size,
+            num_experts,
+            expert_map,
+            pad_sorted_ids,
+            ignore_invalid_experts,
+        )
+
+    def moe_sum(self, inp, out):
+        from .impl.fused_moe import moe_sum_cuda
+
+        moe_sum_cuda(inp, out)
+
+    def topk_softmax(
+        self,
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize=False,
+    ):
+        from .impl.fused_moe import topk_softmax_cuda
+
+        return topk_softmax_cuda(
+            topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
+        )

@@ -18,11 +18,13 @@ def rotary_embedding_ascend(
     position_ids: torch.Tensor,
     rotary_interleaved: bool = False,
     inplace: bool = True,
+    obj=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary position embedding using Ascend NPU.
 
     Args:
+        obj: The calling obj (for interface consistency)
         query: Query tensor [num_tokens, num_heads, rotary_dim]
         key: Key tensor [num_tokens, num_kv_heads, rotary_dim]
         cos: Cosine cache [max_seq_len, rotary_dim // 2]

@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # note: cannot control inner gems op of UnquantizedFusedMoEMethodFL via env variable.
 OOT_OPS = {
     "silu_and_mul": (SiluAndMulFL, "SiluAndMul"),  # noqa F405
+    "gelu_and_mul": (GeluAndMulFL, "GeluAndMul"),  # noqa F405
     "rms_norm": (RMSNormFL, "RMSNorm"),  # noqa F405
     "rotary_embedding": (RotaryEmbeddingFL, "RotaryEmbedding"),  # noqa F405
     "fused_moe": (FusedMoEFL, "FusedMoE"),  # noqa F405
@@ -41,7 +42,12 @@ def register_oot_ops(whitelist: Optional[List[str]] = None) -> None:
     Operators in VLLM_FL_OOT_BLACKLIST or platform config oot_blacklist
     will be excluded from registration.
     """
-    from vllm_fl.utils import get_oot_blacklist, get_oot_whitelist, is_oot_enabled, use_flaggems_op
+    from vllm_fl.utils import (
+        get_oot_blacklist,
+        get_oot_whitelist,
+        is_oot_enabled,
+        use_flaggems_op,
+    )
 
     # Check if OOT registration is enabled
     if not is_oot_enabled():

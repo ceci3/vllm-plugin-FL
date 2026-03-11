@@ -1,5 +1,5 @@
-# vLLM-FL Dispatch Configuration for CUDA
-# Auto-loaded when running on NVIDIA GPU hardware
+# vLLM-FL Dispatch Configuration for METAX
+# Auto-loaded when running on METAX GPU hardware
 
 # Preferred default backend type: flaggems, vendor, reference
 prefer: vendor
@@ -11,11 +11,11 @@ strict: false
 
 # Vendor Whitelist (Optional, allows all if not set)
 # allow_vendors:
-#  - cuda
+#  - metax
 
 # Vendor Blacklist (Optional)
 # deny_vendors:
-#   - ascend
+#   - cuda
 
 # Per-operator backend execution order (Optional)
 # Only the backends listed here will be attempted, in the order specified.
@@ -24,16 +24,19 @@ strict: false
 #   - flaggems      : Default FlagGems implementation (Triton)
 #   - reference     : PyTorch reference implementation
 #   - vendor        : Any available vendor backend (auto-detected)
-#   - vendor:cuda   : CUDA-specific vendor backend
+#   - vendor:metax   : METAX-specific vendor backend
 op_backends:
   # attention_backend: prioritize flaggems (Triton attention)
   attention_backend:
-    - vendor
+    - vendor:metax
+
+  topk_softmax:
+    - vendor:metax
 
   # rms_norm: prioritize flaggems (Triton)
   rms_norm:
     - flagos
-    - vendor
+    - vendor:metax
     - reference
 
   # silu_and_mul: prioritize flaggems
@@ -44,13 +47,15 @@ op_backends:
   # rotary_embedding: prioritize flaggems
   rotary_embedding:
     - flagos
-    - vendor
+    - vendor:metax
     - reference
 
 # FlagOS operator blacklist
 flagos_blacklist:
-  - silu_and_mul
+  - masked_fill
+  - masked_fill_
 
 # OOT (Out-of-Tree) operator blacklist
 oot_blacklist:
-  - silu_and_mul
+  - masked_fill
+  - masked_fill_

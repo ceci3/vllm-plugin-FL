@@ -9,9 +9,8 @@ Replace 'Template' with your vendor name and implement the required operators.
 
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import Optional
 
-import torch
 
 from vllm_fl.dispatch.backends.base import Backend
 

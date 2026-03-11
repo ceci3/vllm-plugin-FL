@@ -398,6 +398,7 @@ class PolicyManager:
 
         # Priority 3: Load platform-specific config as base defaults
         from vllm_fl.dispatch.config import get_config_path
+
         platform_config_path = get_config_path()
         platform_policy = None
         if platform_config_path:

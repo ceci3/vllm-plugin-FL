@@ -33,7 +33,9 @@ def flash_attn_maxseqlen_wrapper(
 ) -> torch.Tensor:
     # -----------------------------------
     # Maca version of flash attention
-    from vllm_fl.dispatch.backends.vendor.maca.impl.attention.utils.fa_utils import flash_attn_varlen_func
+    from vllm_fl.dispatch.backends.vendor.maca.impl.attention.utils.fa_utils import (
+        flash_attn_varlen_func,
+    )
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = flash_attn_varlen_func(

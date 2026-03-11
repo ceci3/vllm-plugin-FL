@@ -8,4 +8,4 @@ from .maca import MacaBackend
 
 __all__ = [
     "MacaBackend",
-    ]
+]

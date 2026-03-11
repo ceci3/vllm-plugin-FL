@@ -10,7 +10,6 @@ from typing import ClassVar
 import numpy as np
 import torch
 
-from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
@@ -39,11 +38,10 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.platforms.interface import DeviceCapability
 from flag_gems import flash_attn_varlen_func, reshape_and_cache_flash
-# from vllm.attention.utils.fa_utils import flash_attn_varlen_func #reshape_and_cache_flash, 
+# from vllm.attention.utils.fa_utils import flash_attn_varlen_func #reshape_and_cache_flash,
 # from flag_gems import reshape_and_cache_flash
 
 logger = init_logger(__name__)
-
 
 
 class AttentionFLBackend(AttentionBackend):
@@ -82,15 +80,15 @@ class AttentionFLBackend(AttentionBackend):
             AttentionType.ENCODER_ONLY,
             AttentionType.ENCODER_DECODER,
         )
+
     @staticmethod
     def get_impl_cls() -> type["AttentionFLImpl"]:
         return AttentionFLImpl
 
-
     @staticmethod
     def get_builder_cls() -> type["AttentionFLMetadataBuilder"]:
         return AttentionFLMetadataBuilder
-    
+
     @classmethod
     def supports_sink(cls) -> bool:
         return False
@@ -101,7 +99,7 @@ class AttentionFLBackend(AttentionBackend):
         if kv_cache_dtype is None:
             return True
         return kv_cache_dtype in ["auto"]
-    
+
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
@@ -154,6 +152,7 @@ class AttentionFLBackend(AttentionBackend):
         if has_sink:
             return "not support sink"
         return None
+
 
 @dataclass
 class AttentionFLMetadata:
@@ -248,7 +247,7 @@ class AttentionFLMetadataBuilder(AttentionMetadataBuilder[AttentionFLMetadata]):
         self.block_size = kv_cache_spec.block_size
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
-        self.aot_schedule = False #get_flash_attn_version() == 3
+        self.aot_schedule = False  # get_flash_attn_version() == 3
 
         try:
             from vllm.distributed.parallel_state import get_dcp_group
@@ -457,7 +456,7 @@ class AttentionFLImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         self.attn_type = attn_type
-        self.vllm_flash_attn_version = 3 # 2 #get_flash_attn_version()
+        self.vllm_flash_attn_version = 3  # 2 #get_flash_attn_version()
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = vllm_is_batch_invariant()
 
@@ -465,7 +464,7 @@ class AttentionFLImpl(AttentionImpl):
             raise NotImplementedError(
                 "AttentionFL does not support quantization kv-cache on this device."
             )
-        ### TODO(lms): support quant to int8/int4 each query input and low precision compute 
+        ### TODO(lms): support quant to int8/int4 each query input and low precision compute
         self.supports_quant_query_input = False
 
     def forward(
@@ -607,7 +606,7 @@ class AttentionFLImpl(AttentionImpl):
                     k_descale=layer._k_scale.expand(descale_shape),
                     v_descale=layer._v_scale.expand(descale_shape),
                     num_splits=attn_metadata.max_num_splits,
-                    s_aux=None, ### self.sinks is support in FA3
+                    s_aux=None,  ### self.sinks is support in FA3
                 )
                 return output
 
@@ -635,7 +634,7 @@ class AttentionFLImpl(AttentionImpl):
             q_descale=layer._q_scale,
             k_descale=layer._k_scale,
             v_descale=layer._v_scale,
-            s_aux=None, ## sink is None
+            s_aux=None,  ## sink is None
         )
         return output
 
@@ -741,7 +740,8 @@ class AttentionFLImpl(AttentionImpl):
         # For encoder attention, process FP8 quantization if needed
         if self.kv_cache_dtype.startswith("fp8"):
             raise NotImplementedError(
-                "quantization is not supported for encoder attention")
+                "quantization is not supported for encoder attention"
+            )
 
         # Use encoder-specific metadata for sequence information
         cu_seqlens_q = attn_metadata.query_start_loc
@@ -777,6 +777,7 @@ class AttentionFLImpl(AttentionImpl):
         )
 
         return output
+
 
 def use_cascade_attention(
     common_prefix_len: int,

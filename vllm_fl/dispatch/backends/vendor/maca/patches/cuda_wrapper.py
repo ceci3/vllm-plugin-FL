@@ -19,7 +19,6 @@ from typing import Any
 import torch  # noqa
 
 import vllm.envs as envs
-from vllm.distributed.device_communicators.cuda_wrapper import logger
 
 # === export types and functions from cudart to Python ===
 # for the original cudart definition, please check

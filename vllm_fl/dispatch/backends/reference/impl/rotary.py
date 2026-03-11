@@ -17,11 +17,13 @@ def rotary_embedding_torch(
     position_ids: torch.Tensor,
     rotary_interleaved: bool = False,
     inplace: bool = True,
+    obj=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary position embedding using PyTorch.
 
     Args:
+        obj: The calling obj (for interface consistency)
         query: Query tensor [batch, num_heads, seq_len, head_dim] or [seq_len, num_heads, head_dim]
         key: Key tensor [batch, num_heads, seq_len, head_dim] or [seq_len, num_heads, head_dim]
         cos: Cosine cache [max_seq_len, rotary_dim] where rotary_dim = head_dim or head_dim // 2

@@ -73,6 +73,15 @@ def register_builtins(registry) -> None:
             vendor="metax",
             priority=BackendPriority.VENDOR,
         ),
+        # topk softmax
+        OpImpl(
+            op_name="topk_softmax",
+            impl_id="vendor.metax",
+            kind=BackendImplKind.VENDOR,
+            fn=_bind_is_available(backend.topk_softmax, is_avail),
+            vendor="metax",
+            priority=BackendPriority.VENDOR,
+        ),
     ]
 
     registry.register_many(impls)

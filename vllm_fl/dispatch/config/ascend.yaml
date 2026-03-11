@@ -54,6 +54,9 @@ op_backends:
 # FlagOS operator blacklist
 # These operators will NOT use FlagOS implementation even if FlagOS is enabled.
 flagos_blacklist:
+  - scatter_add_
+  - ones
+  - ones_like
   - to_copy
   - _to_copy
   - zeros
