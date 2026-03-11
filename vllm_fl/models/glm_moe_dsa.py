@@ -62,7 +62,9 @@ def _patched_indexer_forward(
     q_scale = q_scale.view(-1, self.n_head, 1)
 
     weights, _ = self.weights_proj(hidden_states)
-    weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head**-0.5
+    weights = (
+        weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head**-0.5
+    )
     weights = weights.squeeze(-1)
 
     return torch.ops.vllm.sparse_attn_indexer(
@@ -81,7 +83,6 @@ def _patched_indexer_forward(
         self.topk_indices_buffer,
     )
 
-
 def patch_is_deepseek_mla():
     """Patch ``ModelConfig.is_deepseek_mla`` to recognise ``glm_moe_dsa``."""
     from vllm.config.model import ModelConfig
@@ -99,7 +100,6 @@ def patch_is_deepseek_mla():
         return _orig(self)
 
     ModelConfig.is_deepseek_mla = _patched
-
 
 # Monkey-patch the Indexer.forward to fix dimension mismatch in the
 # installed vLLM 0.13.0.
@@ -135,6 +135,7 @@ class GlmMoeDsaForCausalLM(DeepseekV2ForCausalLM):
         # Filter them out to avoid KeyError during weight loading.
         if self._indexer_disabled:
             weights = (
-                (name, weight) for name, weight in weights if ".indexer." not in name
+                (name, weight) for name, weight in weights
+                if ".indexer." not in name
             )
         return super().load_weights(weights)

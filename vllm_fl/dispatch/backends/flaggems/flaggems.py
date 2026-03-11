@@ -47,8 +47,8 @@ class FlagGemsBackend(Backend):
         SiLU activation followed by element-wise multiplication.
 
         Args:
-            obj: The calling obj (for interface consistency)
             x: Input tensor of shape [..., 2*d]
+            obj: The calling obj (for interface consistency)
 
         Returns:
             Output tensor of shape [..., d]
@@ -62,8 +62,8 @@ class FlagGemsBackend(Backend):
         GELU activation followed by element-wise multiplication.
 
         Args:
-            obj: The calling obj (for interface consistency)
             x: Input tensor of shape [..., 2*d]
+            obj: The calling obj (for interface consistency)
 
         Returns:
             Output tensor of shape [..., d]
@@ -82,9 +82,9 @@ class FlagGemsBackend(Backend):
         RMS normalization.
 
         Args:
-            obj: The calling obj (e.g., RMSNorm layer)
             x: Input tensor
             residual: Optional residual tensor
+            obj: The calling obj (e.g., RMSNorm layer)
 
         Returns:
             Normalized tensor, or tuple of (normalized, residual) if residual is provided
@@ -108,7 +108,6 @@ class FlagGemsBackend(Backend):
         Apply rotary position embedding.
 
         Args:
-            obj: The calling obj (for interface consistency)
             query: Query tensor
             key: Key tensor
             cos: Cosine cache
@@ -116,6 +115,7 @@ class FlagGemsBackend(Backend):
             position_ids: Position indices
             rotary_interleaved: Whether to use interleaved rotary
             inplace: Whether to modify tensors in-place
+            obj: The calling obj (for interface consistency)
 
         Returns:
             Tuple of (embedded_query, embedded_key)
@@ -133,12 +133,13 @@ class FlagGemsBackend(Backend):
             obj=obj,
         )
 
-    def attention_backend(self, use_mla: bool = False) -> str:
+    def attention_backend(self, use_mla: bool = False, use_sparse: bool = False) -> str:
         """
         Get the attention backend class path for FlagGems.
 
         Args:
             use_mla: Whether to use Multi-head Latent Attention (MLA)
+            use_sparse: Whether to use Deepseek Sparse Attention (DSA)
 
         Returns:
             Fully qualified class path string
@@ -154,6 +155,9 @@ class FlagGemsBackend(Backend):
 
         if use_mla:
             raise NotImplementedError("NOT support mla now!")
+
+        if use_sparse:
+            raise ValueError("use_sparse=True requires use_mla=True.")
 
         return AttentionBackendEnum.TRITON_ATTN.get_path()
 

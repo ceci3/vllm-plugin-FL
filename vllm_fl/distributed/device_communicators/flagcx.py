@@ -17,7 +17,7 @@ from vllm.utils.torch_utils import current_stream
 import os
 import sys
 
-_flagcx_path = os.getenv("FLAGCX_PATH")
+_flagcx_path = os.getenv('FLAGCX_PATH')
 if _flagcx_path and os.path.isdir(_flagcx_path):
     sys.path.append(_flagcx_path)
 

@@ -5,9 +5,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fla.ops import (
     chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
 )
-
 logger = init_logger(__name__)
-
 
 def fi_chunk_gated_delta_rule(
     q: torch.Tensor,
@@ -51,7 +49,6 @@ def fi_chunk_gated_delta_rule(
     )
     # Unsqueeze back to 4D (1, L, H, D) to match fla output format
     return output.unsqueeze(0), final_state
-
 
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRuleOp(CustomOp):

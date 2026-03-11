@@ -45,6 +45,7 @@ class RotaryEmbeddingFL(RotaryEmbedding):
 
         q_embed, k_embed = call_op(
             "rotary_embedding",
+            self,
             query_rot,
             key_rot,
             cos,

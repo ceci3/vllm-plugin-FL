@@ -70,8 +70,8 @@ class CudaBackend(Backend):
         Uses vLLM's native CUDA implementation.
 
         Args:
-            obj: The calling obj (for interface consistency)
             x: Input tensor of shape [..., 2*d]
+            obj: The calling obj (for interface consistency)
 
         Returns:
             Output tensor of shape [..., d]
@@ -87,8 +87,8 @@ class CudaBackend(Backend):
         Uses vLLM's native CUDA implementation.
 
         Args:
-            obj: The calling obj (for interface consistency)
             x: Input tensor of shape [..., 2*d]
+            obj: The calling obj (for interface consistency)
 
         Returns:
             Output tensor of shape [..., d]
@@ -101,14 +101,15 @@ class CudaBackend(Backend):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
+        obj = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
         RMS normalization using vLLM's CUDA implementation.
 
         Args:
-            obj: The calling obj (e.g., RMSNorm layer)
             x: Input tensor
             residual: Optional residual tensor
+            obj: The calling obj (e.g., RMSNorm layer)
 
         Returns:
             Normalized tensor, or tuple of (normalized, residual) if residual is provided
@@ -132,7 +133,6 @@ class CudaBackend(Backend):
         Apply rotary position embedding using vLLM's CUDA implementation.
 
         Args:
-            obj: The calling obj (for interface consistency)
             query: Query tensor
             key: Key tensor
             cos: Cosine cache
@@ -140,6 +140,7 @@ class CudaBackend(Backend):
             position_ids: Position indices
             rotary_interleaved: Whether to use interleaved rotary
             inplace: Whether to modify tensors in-place
+            obj: The calling obj (for interface consistency)
 
         Returns:
             Tuple of (embedded_query, embedded_key)
@@ -154,18 +155,21 @@ class CudaBackend(Backend):
             position_ids,
             rotary_interleaved=rotary_interleaved,
             inplace=inplace,
+            obj=obj,
         )
 
-    def attention_backend(self, use_mla: bool = False) -> str:
+    def attention_backend(self, use_mla: bool = False, use_sparse: bool = False) -> str:
         """
         Get the attention backend class path for CUDA.
 
         Supports:
         - FLASH_ATTN (default)
         - TRITON_ATTN (when use_flaggems_op("triton_attn") is True)
+        - FLASHMLA_SPARSE (when use_mla and use_sparse are both True)
 
         Args:
             use_mla: Whether to use Multi-head Latent Attention (MLA)
+            use_sparse: Whether to use Deepseek Sparse Attention (DSA)
 
         Returns:
             Fully qualified class path string
@@ -173,6 +177,8 @@ class CudaBackend(Backend):
         from vllm.attention.backends.registry import AttentionBackendEnum
 
         if use_mla:
+            if use_sparse:
+                return AttentionBackendEnum.FLASHMLA_SPARSE.get_path()
             return AttentionBackendEnum.FLASHMLA.get_path()
 
         # Default to FLASH_ATTN

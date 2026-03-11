@@ -1,0 +1,151 @@
+[build-system]
+requires = [
+    "setuptools>=77.0.3,<81.0.0",
+    "setuptools-scm>=8.0",
+    "torch>=2.7.1",
+    "wheel",
+    "scikit-build-core==0.11",
+    "pybind11",
+    "ninja",
+    "cmake",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-plugin-fl"
+version = "0.1.0"
+description = "A vLLM plugin built on the FlagOS unified multi-chip backend"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+    "pyyaml",
+]
+
+[project.entry-points."vllm.platform_plugins"]
+fl = "vllm_fl:register"
+
+[project.entry-points."vllm.general_plugins"]
+fl = "vllm_fl:register_model"
+
+[project.urls]
+Homepage = "https://github.com/flagos-ai/vllm-plugin-FL"
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-cov",
+    "pytest-json-report",
+    "numpy",
+    "torch>=2.7.1",
+    "decorator",
+    "vllm[audio]==0.13.0",
+    "modelscope>=1.18.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vllm_fl*"]
+
+[tool.setuptools.package-data]
+"vllm_fl.dispatch.config" = ["*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "gpu: marks tests as requiring single GPU (deselect with '-m \"not gpu\"')",
+    "multi_gpu: marks tests as requiring multiple GPUs",
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "e2e: marks tests as end-to-end tests",
+    "flaggems: marks tests as requiring flag_gems library",
+    "functional: marks tests as functional tests",
+]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+[tool.coverage.run]
+source = ["vllm_fl"]
+omit = [
+    "tests/*",
+    "examples/*",
+    "benchmarks/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+
+[tool.ruff]
+exclude = [
+    "vllm_fl/**",
+
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "ISC", # flake8-implicit-str-concat
+    "SIM", # flake8-simplify
+    "I",   # isort
+    "G",   # flake8-logging-format
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "E731",  # lambda expression assignment
+    "E402",  # Module level import not at top of file
+    "E722",  # Use bare except, specify exception instead
+    "E731",  # lambda assignment
+    "E741",  # Use variables named 'l', 'O', or 'I'
+    "F405",  # star imports
+    "F403",  # star imports
+    "B008",  # do not perform function calls in argument defaults
+    "B905",  # zip without `strict=`
+    "B007",  # Loop control variable not used within loop body
+    "UP015", # Explicit is better than implicit" rule
+    "UP032", # f-string format
+    "G004",  # logging f-string
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party = ["vllm"]
+known-local-folder = ["vllm_fl"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.typos.files]
+# these files may be written in non english words
+extend-exclude = ["tests/**", "vllm_fl/**"]
+ignore-hidden = true
+ignore-files = true
+ignore-dot = true
+ignore-vcs = true
+ignore-global = true
+ignore-parent = true

@@ -21,7 +21,6 @@ pip install vllm[video]
 git clone https://github.com/flagos-ai/vllm-plugin-FL
 
 cd vllm-plugin-FL
-pip install -r requirements.txt
 pip install --no-build-isolation .
 # or editble install
 pip install --no-build-isolation -e .
@@ -33,7 +32,7 @@ pip install --no-build-isolation -e .
 pip install flag-gems==4.2.1rc0 [-i https://pypi.tuna.tsinghua.edu.cn/simple]
 ```
 
-#### 1.2.3 [Opitonal] Install [FlagCX](https://github.com/flagos-ai/FlagCX/blob/main/docs/getting_started.md#build-and-installation)
+#### 1.2.3 [Optional] Install [FlagCX](https://github.com/flagos-ai/FlagCX/blob/main/docs/getting_started.md#build-and-installation)
 
 ```sh
 git clone https://github.com/flagos-ai/FlagCX.git
@@ -64,4 +63,3 @@ vllm serve <model_path>  --dtype auto --max-model-len 2048 --api-key token-abc12
 - `--api-key`: Set the API access key
 - `--max-model-len`: Set the maximum model length
 - `--gpu_memory_utilization`: GPU memory utilization rate
-

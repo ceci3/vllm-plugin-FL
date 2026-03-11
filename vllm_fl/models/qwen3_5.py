@@ -79,7 +79,9 @@ class Qwen3_5SparseMoeBlock(Qwen3NextSparseMoeBlock):
         # Temporarily patch hf_config to point to hf_text_config
         # so the parent class reads the right config
         original_hf_config = vllm_config.model_config.hf_config
-        vllm_config.model_config.hf_config = vllm_config.model_config.hf_text_config
+        vllm_config.model_config.hf_config = (
+            vllm_config.model_config.hf_text_config
+        )
         try:
             super().__init__(vllm_config=vllm_config, prefix=prefix)
         finally:
@@ -407,12 +409,16 @@ class Qwen3_5Model(Qwen3NextModel):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size
+            )
         )
 
         if get_pp_group().is_last_rank:
-            self.norm = Qwen3_5RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.norm = Qwen3_5RMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
         else:
             self.norm = PPMissingLayer()
 
@@ -441,7 +447,9 @@ class Qwen3_5Model(Qwen3NextModel):
                 loaded_local_expert = True
         return loaded_local_expert
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> set[str]:
         stacked_params_mapping = [
             # self attention
             ("qkv_proj", "q_proj", "q"),
@@ -466,7 +474,9 @@ class Qwen3_5Model(Qwen3NextModel):
             ("experts.w2_weight", "experts.down_proj", 0, "w2"),
         ]
         num_experts = (
-            self.config.num_experts if hasattr(self.config, "num_experts") else 0
+            self.config.num_experts
+            if hasattr(self.config, "num_experts")
+            else 0
         )
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -475,7 +485,10 @@ class Qwen3_5Model(Qwen3NextModel):
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                if "experts.gate_up_proj" in name or "experts.down_proj" in name:
+                if (
+                    "experts.gate_up_proj" in name
+                    or "experts.down_proj" in name
+                ):
                     is_fused_expert = True
                     expert_params_mapping = fused_expert_params_mapping
 
@@ -496,9 +509,13 @@ class Qwen3_5Model(Qwen3NextModel):
                 if isinstance(shard_id, tuple):
                     # Multi-shard: split loaded_weight and load each
                     layer = weight_loader.__self__
-                    split_sizes = [layer.output_sizes[s] for s in shard_id]
+                    split_sizes = [
+                        layer.output_sizes[s] for s in shard_id
+                    ]
                     output_dim = getattr(param, "output_dim", 0)
-                    parts = loaded_weight.split(split_sizes, dim=output_dim)
+                    parts = loaded_weight.split(
+                        split_sizes, dim=output_dim
+                    )
                     for s, part in zip(shard_id, parts):
                         weight_loader(param, part, s)
                 else:
@@ -598,7 +615,9 @@ class Qwen3_5_MoeMixtureOfExperts(MixtureOfExperts):
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        self.num_redundant_experts = (
+            num_physical_experts - self.num_logical_experts
+        )
         for layer in self._get_moe_model_layers():
             if isinstance(layer.mlp, Qwen3_5SparseMoeBlock):
                 moe = layer.mlp
@@ -705,9 +724,12 @@ class Qwen3_5MoeForCausalLM(
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> set[str]:
+
         def _remap_weights(
-            weights: Iterable[tuple[str, torch.Tensor]],
+            weights: Iterable[tuple[str, torch.Tensor]]
         ) -> Iterable[tuple[str, torch.Tensor]]:
             for name, tensor in weights:
                 # The HF checkpoint for Qwen3_5MoeForConditionalGeneration
@@ -901,7 +923,9 @@ class Qwen3_5MoeForConditionalGeneration(
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> set[str]:
         skip_prefixes = ["mtp."]
         if self.visual is None:
             skip_prefixes.append("visual.")

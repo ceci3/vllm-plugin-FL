@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, devops]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+  pull_request:
+    branches: [main, devops]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================
+  # Job 1: Lint (ruff check, ruff format, typos)
+  # Runs on every push/PR. Fast, no special requirements.
+  # ============================================================
+  lint:
+    uses: ./.github/workflows/lint.yml
+
+  # ============================================================
+  # Job 2: Unit tests (no GPU required)
+  # Tests dispatch, ops logic, mocks, etc.
+  # ============================================================
+  unit-tests:
+    needs: lint
+    uses: ./.github/workflows/unit-test.yml
+
+  # ============================================================
+  # Job 3: Build & install check
+  # Verify the package can be built and installed cleanly.
+  # ============================================================
+  build:
+    needs: lint
+    uses: ./.github/workflows/build-wheel.yml
+
+  # ============================================================
+  # Job 4: Functional tests (GPU required)
+  # Runs on self-hosted GPU runners. Only on main branch push
+  # or PRs labeled 'gpu-test'.
+  # ============================================================
+  functional-tests:
+    needs: unit-tests
+    uses: ./.github/workflows/functional-test.yml

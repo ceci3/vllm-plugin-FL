@@ -10,6 +10,7 @@ import torch
 
 
 def rotary_embedding_cuda(
+    obj,
     query: torch.Tensor,
     key: torch.Tensor,
     cos: torch.Tensor,

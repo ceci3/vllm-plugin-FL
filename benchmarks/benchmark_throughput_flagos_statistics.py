@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-import re
 import os
+import re
 import statistics
 
 SCENARIOS = [
@@ -14,22 +14,23 @@ SCENARIOS = [
     "p6144d1024",
     "p4096d1024",
     "p2048d1024",
-    "p1024d1024"
+    "p1024d1024",
 ]
 
 LOG_DIR = "./vllm_bench_logs"
+
 
 def extract_throughputs(log_path):
     output_throughput = None
     total_throughput = None
     try:
-        with open(log_path, 'r', encoding='utf-8') as f:
+        with open(log_path, "r", encoding="utf-8") as f:
             content = f.read()
     except FileNotFoundError:
         return None, None
 
-    out_match = re.search(r'Output token throughput \(tok/s\):\s*([\d.]+)', content)
-    tot_match = re.search(r'Total Token throughput \(tok/s\):\s*([\d.]+)', content)
+    out_match = re.search(r"Output token throughput \(tok/s\):\s*([\d.]+)", content)
+    tot_match = re.search(r"Total Token throughput \(tok/s\):\s*([\d.]+)", content)
 
     if out_match:
         output_throughput = float(out_match.group(1))
@@ -37,6 +38,7 @@ def extract_throughputs(log_path):
         total_throughput = float(tot_match.group(1))
 
     return output_throughput, total_throughput
+
 
 def compute_extended_stats(values):
     valid_vals = [v for v in values if v is not None]
@@ -60,8 +62,9 @@ def compute_extended_stats(values):
         f"{median_val:.2f}",
         f"{max_val:.2f}",
         f"{stdev_val:.2f}",
-        sigma_str
+        sigma_str,
     )
+
 
 def main():
     # aligned output
@@ -100,6 +103,7 @@ def main():
             f"{tot_stats[0]:>{num_width}} | {tot_stats[1]:>{num_width}} | {tot_stats[2]:>{num_width}} | {tot_stats[3]:>{num_width}} | {tot_stats[4]:>{sigma_width}}"
         )
         print(line)
+
 
 if __name__ == "__main__":
     main()

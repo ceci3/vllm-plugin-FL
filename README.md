@@ -1,39 +1,65 @@
-# vllm-FL
-A vLLM plugin built on the FlagOS unified multi-chip backend.
+# vllm-plugin-FL
+
+vllm-plugin-FL is a plugin for the [vLLM](https://github.com/vllm-project/vllm) inference/serving framework, built on FlagOS's unified multi-chip backend — including the unified operator library [FlagGems](https://github.com/flagos-ai/FlagGems) and the unified communication library [FlagCX](https://github.com/flagos-ai/FlagCX). It extends vLLM's capabilities and performance across diverse hardware environments. Without changing vLLM's original interfaces or usage patterns, the same command can run model inference/serving on different chips.
+
+## Supported Models and Chips
+
+In theory, vllm-plugin-FL can support all models available in vLLM, as long as no unsupported operators are involved. The tables below summarize the current support status of end-to-end verified models and chips, including both fully supported and in-progress ("Merging") entries.
+
+### Supported Models
+
+| Model | Status | Reference |
+|-------|--------|-----------|
+| Qwen3.5-397B-A17B | Supported | [example](./examples/qwen3_5_offline_inference.py) |
+| Qwen3-Next-80B-A3B | Supported | [example](./examples/qwen3_next_offline_inference.py) |
+| Qwen3-4B | Supported | [example](./examples/offline_inference.py) |
+| MiniCPM-o 4.5 | Supported | [example](./examples/minicpm/) |
+
+### Supported Chips
+
+| Chip Vendor | Status | Reference |
+|-------------|--------|-----------|
+| NVIDIA | Supported | - |
+| Ascend | Merging | [PR #55](https://github.com/flagos-ai/vllm-plugin-FL/pull/55) |
+| MetaX | Merging | [PR #47](https://github.com/flagos-ai/vllm-plugin-FL/pull/47) |
+| Pingtouge-Zhenwu | Supported | - |
+| Iluvatar | Supported | - |
+| Tsingmicro | Merging | [PR #52](https://github.com/flagos-ai/vllm-plugin-FL/pull/52) |
+| Moore Threads | Supporting | - |
+| Hygon | Supporting | - |
 
 ## Quick Start
 
 ### Setup
 
-0. Install vllm from the official [v0.13.0](https://github.com/vllm-project/vllm/tree/v0.13.0) (optional if the correct version is installed) or from the fork [vllm-FL](https://github.com/flagos-ai/vllm-FL).
+1. Install vllm from the official [v0.13.0](https://github.com/vllm-project/vllm/tree/v0.13.0) (optional if the correct version is installed) or from the fork [vllm-FL](https://github.com/flagos-ai/vllm-FL).
 
 
-1. Install vllm-plugin-FL
+2. Install vllm-plugin-FL
 
-    1.1 Clone the repository:
+    2.1 Clone the repository:
 
     ```sh
     git clone https://github.com/flagos-ai/vllm-plugin-FL
     ```
 
-    1.2 install
+    2.2 install
     ```sh
     cd vllm-plugin-FL
-    pip install -r requirements.txt
     pip install --no-build-isolation .
     # or editble install
     pip install --no-build-isolation -e .
     ```
 
-2. Install [FlagGems](https://github.com/flagos-ai/FlagGems/blob/master/docs/getting-started.md#quick-installation)
+3. Install [FlagGems](https://github.com/flagos-ai/FlagGems/blob/master/docs/getting-started.md#quick-installation)
 
-    2.1 Install Build Dependencies
+    3.1 Install Build Dependencies
 
     ```sh
     pip install -U scikit-build-core==0.11 pybind11 ninja cmake
     ```
 
-    2.2 Installation FlagGems
+    3.2 Installation FlagGems
 
     ```sh
     git clone https://github.com/flagos-ai/FlagGems
@@ -43,35 +69,57 @@ A vLLM plugin built on the FlagOS unified multi-chip backend.
     pip install --no-build-isolation -e .
     ```
 
-3. Install [FlagCX](https://github.com/flagos-ai/FlagCX/blob/main/docs/getting_started.md#build-and-installation)
+4. (Optional) Install [FlagCX](https://github.com/flagos-ai/FlagCX/blob/main/docs/getting_started.md#build-and-installation)
 
-    3.1 Clone the repository:
+    4.1 Clone the repository:
     ```sh
     git clone https://github.com/flagos-ai/FlagCX.git
     cd FlagCX
-    git checkout -b v0.7.0
+    git checkout -b v0.9.0
     git submodule update --init --recursive
     ```
 
-    3.2 Build the library with different flags targeting to different platforms:
+    4.2 Build the library with different flags targeting to different platforms:
     ```sh
     make USE_NVIDIA=1
     ```
 
-    3.3 Set environment
+    4.3 Set environment
     ```sh
     export FLAGCX_PATH="$PWD"
     ```
 
-    3.4 Installation FlagCX
+    4.4 Installation FlagCX
     ```sh
     cd plugin/torch/
-    python setup.py develop --adaptor [xxx]
+    FLAGCX_ADAPTOR=[xxx] pip install . --no-build-isolation
+    # or editable install
+    FLAGCX_ADAPTOR=[xxx] pip install -e . --no-build-isolation
     ```
     Note: [xxx] should be selected according to the current platform, e.g., nvidia, ascend, etc.
 
 
 If there are multiple plugins in the current environment, you can specify use vllm-plugin-fl via VLLM_PLUGINS='fl'.
+
+### Additional Steps for Ascend
+
+1. Install [FlagTree](https://resource.flagos.net)
+
+    ```sh
+    RES="--index-url=https://resource.flagos.net/repository/flagos-pypi-hosted/simple --trusted-host=https://resource.flagos.net"
+    python3 -m pip install flagtree==0.4.0+ascend3.2 $RES
+    ```
+
+2. Set required environment variable
+
+    ```sh
+    export TRITON_ALL_BLOCKS_PARALLEL=1
+    ```
+
+3. Enable eager execution
+
+    Ascend requires eager execution. Add `enforce_eager=True` to the `LLM` constructor or pass `--enforce-eager` on the command line.
+
 
 ### Run a Task
 
@@ -103,14 +151,14 @@ if __name__ == '__main__':
 
 For dispatch environment variable usage, see [environment variables usage](./vllm_fl/dispatch/README.md#environment-variables).
 
-### Using CudaCommunication library
-If you want to use the original CudaCommunication, you can unset the following environment variables.
+### Using Cuda Communication library
+If you want to use the original Cuda Communication, you can unset the following environment variables.
 ```sh
 unset FLAGCX_PATH
 ```
 
 ### Using native CUDA operators
-If you want to use the original CUDA operators, you can unset the following environment variables.
+If you want to use the original CUDA operators, you can set the following environment variables.
 ```sh
-unset USE_FLAGGEMS
+export USE_FLAGGEMS=0
 ```

@@ -70,14 +70,15 @@ class AscendBackend(Backend):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
+        obj = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
         RMS normalization.
 
         Args:
-            obj: The calling obj (e.g., RMSNorm layer)
             x: Input tensor
             residual: Optional residual tensor
+            obj: The calling obj (e.g., RMSNorm layer)
 
         Returns:
             Normalized tensor, or tuple of (normalized, residual) if residual is provided
@@ -101,7 +102,6 @@ class AscendBackend(Backend):
         Apply rotary position embedding.
 
         Args:
-            obj: The calling obj (for interface consistency)
             query: Query tensor
             key: Key tensor
             cos: Cosine cache
@@ -109,6 +109,7 @@ class AscendBackend(Backend):
             position_ids: Position indices
             rotary_interleaved: Whether to use interleaved rotary
             inplace: Whether to modify tensors in-place
+            obj: The calling obj (for interface consistency)
 
         Returns:
             Tuple of (embedded_query, embedded_key)
@@ -123,9 +124,10 @@ class AscendBackend(Backend):
             position_ids,
             rotary_interleaved=rotary_interleaved,
             inplace=inplace,
+            obj=obj,
         )
 
-    def attention_backend(self, use_mla: bool = False) -> str:
+    def attention_backend(self, use_mla: bool = False, use_sparse: bool = False) -> str:
         """
         Get the attention backend class path for Ascend NPU.
 
@@ -138,10 +140,13 @@ class AscendBackend(Backend):
 
         Args:
             use_mla: Whether to use Multi-head Latent Attention (MLA)
+            use_sparse: Whether to use Deepseek Sparse Attention (DSA)
 
         Returns:
             Fully qualified class path string
         """
         if use_mla:
+            if use_sparse:
+                raise NotImplementedError("MLA with sparse attention is not implemented for Ascend yet.")
             return "vllm_fl.dispatch.backends.vendor.ascend.impl.attention.AscendMLABackend"
         return "vllm_fl.dispatch.backends.vendor.ascend.impl.attention.AscendAttentionBackend"

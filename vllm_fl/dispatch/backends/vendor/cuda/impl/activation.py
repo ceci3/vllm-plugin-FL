@@ -16,6 +16,7 @@ def silu_and_mul_cuda(x: torch.Tensor, obj=None) -> torch.Tensor:
     Uses vLLM's optimized CUDA kernel when available.
 
     Args:
+        obj: The calling obj (for interface consistency)
         x: Input tensor of shape [..., 2*d]
         obj: The calling obj (optional, for interface consistency)
 

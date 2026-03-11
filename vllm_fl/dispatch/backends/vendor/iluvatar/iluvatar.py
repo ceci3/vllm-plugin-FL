@@ -62,7 +62,6 @@ class IluvatarBackend(Backend):
                             IluvatarBackend._available = True
                         else:
                             IluvatarBackend._available = False
-
                     else:
                         IluvatarBackend._available = False
             except Exception:
@@ -76,8 +75,8 @@ class IluvatarBackend(Backend):
         SiLU activation followed by element-wise multiplication.
 
         Args:
-            obj: The calling obj (for interface consistency)
             x: Input tensor of shape [..., 2*d]
+            obj: The calling obj (for interface consistency)
 
         Returns:
             Output tensor of shape [..., d]
@@ -90,14 +89,15 @@ class IluvatarBackend(Backend):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
+        obj = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
         RMS normalization.
 
         Args:
-            obj: The calling obj (e.g., RMSNorm layer)
             x: Input tensor
             residual: Optional residual tensor
+            obj: The calling obj (e.g., RMSNorm layer)
 
         Returns:
             Normalized tensor, or tuple of (normalized, residual) if residual is provided
@@ -143,14 +143,16 @@ class IluvatarBackend(Backend):
             position_ids,
             rotary_interleaved=rotary_interleaved,
             inplace=inplace,
+            obj=obj,
         )
 
-    def attention_backend(self, use_mla: bool = False) -> str:
+    def attention_backend(self, use_mla: bool = False, use_sparse: bool = False) -> str:
         """
         Get the attention backend class path for Iluvatar.
 
         Args:
             use_mla: Whether to use Multi-head Latent Attention (MLA)
+            use_sparse: Whether to use Deepseek Sparse Attention (DSA)
 
         Returns:
             Fully qualified class path string
@@ -158,6 +160,8 @@ class IluvatarBackend(Backend):
         from vllm.attention.backends.registry import AttentionBackendEnum
 
         if use_mla:
+            if use_sparse:
+                return AttentionBackendEnum.FLASHMLA_SPARSE.get_path()
             return AttentionBackendEnum.FLASHMLA.get_path()
 
         return AttentionBackendEnum.FLASH_ATTN.get_path()

@@ -1,0 +1,47 @@
+name: Documentation
+description: Report an issue with the documentation
+title: "[Docs]: "
+labels: ["docs"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping us improve the documentation.
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Issue Type
+      options:
+        - Inaccurate or outdated content
+        - Missing documentation
+        - Code example error
+        - Typo or formatting issue
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Location
+      description: Link to the page or file path where the issue is (e.g. README.md, examples/offline_inference.py).
+      placeholder: "e.g. README.md#quick-start"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe what is wrong or missing in the documentation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggested-fix
+    attributes:
+      label: Suggested Fix
+      description: If you have a suggestion for how to fix the issue, please describe it here.
+    validations:
+      required: false

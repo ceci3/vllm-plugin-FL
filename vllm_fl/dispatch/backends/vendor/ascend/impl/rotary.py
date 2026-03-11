@@ -11,6 +11,7 @@ import torch
 
 
 def rotary_embedding_ascend(
+    obj,
     query: torch.Tensor,
     key: torch.Tensor,
     cos: torch.Tensor,

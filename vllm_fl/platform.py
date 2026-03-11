@@ -193,12 +193,14 @@ class PlatformFL(Platform):
         from vllm_fl.dispatch import call_op
 
         use_mla = attn_selector_config.use_mla
+        use_sparse = attn_selector_config.use_sparse
 
-        backend_path = call_op("attention_backend", use_mla=use_mla)
+        backend_path = call_op("attention_backend", use_mla=use_mla, use_sparse=use_sparse)
 
         logger.info_once(
-            "Using attention backend via dispatch (use_mla=%s): %s",
+            "Using attention backend via dispatch (use_mla=%s, use_sparse=%s): %s",
             use_mla,
+            use_sparse,
             backend_path,
             scope="local",
         )
