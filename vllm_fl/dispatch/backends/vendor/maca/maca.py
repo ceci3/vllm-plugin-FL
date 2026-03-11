@@ -132,15 +132,17 @@ class MacaBackend(Backend):
             position_ids,
             rotary_interleaved=rotary_interleaved,
             inplace=inplace,
+            obj=obj,
         )
 
-    def attention_backend(self, use_mla: bool = False) -> str:
+    def attention_backend(self, use_mla: bool = False, use_sparse: bool = False) -> str:
         """
         Get the attention backend class path for CUDA.
 
         Supports:
         - FLASH_ATTN (default)
         - TRITON_ATTN (when use_flaggems_op("triton_attn") is True)
+        - FLASHMLA_SPARSE (when use_mla and use_sparse are both True)
 
         Args:
             use_mla: Whether to use Multi-head Latent Attention (MLA)
@@ -154,6 +156,8 @@ class MacaBackend(Backend):
         register_attention_backends()
 
         if use_mla:
+            if use_sparse:
+                return AttentionBackendEnum.FLASHMLA_SPARSE.get_path()
             return AttentionBackendEnum.FLASHMLA.get_path()
 
         # Default to FLASH_ATTN
