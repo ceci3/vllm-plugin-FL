@@ -237,13 +237,13 @@ def fused_experts_impl(
         # todo: dispatch to flag_gems and other backends
         if activation == "silu":
             intermediate_cache2 = call_op(
-                "silu_and_mul", intermediate_cache1.view(-1, N)
+                "silu_and_mul", None, intermediate_cache1.view(-1, N)
             )
             # torch.ops._C.silu_and_mul(intermediate_cache2,
             #                           intermediate_cache1.view(-1, N))
         elif activation == "gelu":
             intermediate_cache2 = call_op(
-                "gelu_and_mul", intermediate_cache1.view(-1, N)
+                "gelu_and_mul", None, intermediate_cache1.view(-1, N)
             )
         # Activation function without multiplication
         elif activation == "silu_no_mul":

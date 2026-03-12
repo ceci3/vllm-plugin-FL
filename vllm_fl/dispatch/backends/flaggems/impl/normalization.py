@@ -12,17 +12,17 @@ import torch
 
 
 def rms_norm_flaggems(
+    obj,
     x: torch.Tensor,
     residual: Optional[torch.Tensor] = None,
-    obj=None,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     """
     RMS normalization using FlagGems.
 
     Args:
+        obj: The calling obj (e.g., RMSNorm layer)
         x: Input tensor
         residual: Optional residual tensor
-        obj: The calling obj (e.g., RMSNorm layer)
 
     Returns:
         Normalized tensor, or tuple of (normalized, residual) if residual is provided

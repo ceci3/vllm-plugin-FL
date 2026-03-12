@@ -10,6 +10,7 @@ import torch
 
 
 def rotary_embedding_flaggems(
+    obj,
     query: torch.Tensor,
     key: torch.Tensor,
     cos: torch.Tensor,
@@ -17,12 +18,12 @@ def rotary_embedding_flaggems(
     position_ids: torch.Tensor,
     rotary_interleaved: bool = False,
     inplace: bool = True,
-    obj=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary position embedding using FlagGems.
 
     Args:
+        obj: The calling obj (for interface consistency)
         query: Query tensor
         key: Key tensor
         cos: Cosine cache
@@ -30,7 +31,6 @@ def rotary_embedding_flaggems(
         position_ids: Position indices
         rotary_interleaved: Whether to use interleaved rotary
         inplace: Whether to modify tensors in-place
-        obj: The calling obj (for interface consistency)
 
     Returns:
         Tuple of (embedded_query, embedded_key)

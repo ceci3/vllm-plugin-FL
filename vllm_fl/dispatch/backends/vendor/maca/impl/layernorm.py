@@ -6,11 +6,9 @@ import torch
 
 
 def rms_norm_maca(
+    obj,
     x: torch.Tensor,
-    residual: torch.Tensor | None,
-    weight: torch.Tensor,
-    epsilon: float,
-    obj=None,
+    residual: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     RMS normalization using Maca's CUDA implementation.

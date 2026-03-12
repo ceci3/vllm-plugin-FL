@@ -9,7 +9,7 @@ from __future__ import annotations
 import torch
 
 
-def silu_and_mul_cuda(x: torch.Tensor, obj=None) -> torch.Tensor:
+def silu_and_mul_cuda(obj, x: torch.Tensor) -> torch.Tensor:
     """
     SiLU activation followed by element-wise multiplication using CUDA.
 
@@ -18,7 +18,6 @@ def silu_and_mul_cuda(x: torch.Tensor, obj=None) -> torch.Tensor:
     Args:
         obj: The calling obj (for interface consistency)
         x: Input tensor of shape [..., 2*d]
-        obj: The calling obj (optional, for interface consistency)
 
     Returns:
         Output tensor of shape [..., d]
@@ -31,15 +30,15 @@ def silu_and_mul_cuda(x: torch.Tensor, obj=None) -> torch.Tensor:
     return out
 
 
-def gelu_and_mul_cuda(x: torch.Tensor, obj=None) -> torch.Tensor:
+def gelu_and_mul_cuda(obj, x: torch.Tensor) -> torch.Tensor:
     """
     GELU activation followed by element-wise multiplication using CUDA.
 
     Uses vLLM's optimized CUDA kernel.
 
     Args:
+        obj: The calling obj (for interface consistency)
         x: Input tensor of shape [..., 2*d]
-        obj: The calling obj (optional, for interface consistency)
 
     Returns:
         Output tensor of shape [..., d]

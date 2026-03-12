@@ -10,7 +10,7 @@ class SiluAndMulFL(SiluAndMul):
         super().__init__()
 
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-        return call_op("silu_and_mul", x, obj=self)
+        return call_op("silu_and_mul", self, x)
 
 
 class GeluAndMulFL(GeluAndMul):
@@ -18,7 +18,7 @@ class GeluAndMulFL(GeluAndMul):
         super().__init__(approximate=approximate)
 
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-        return call_op("gelu_and_mul", x, obj=self)
+        return call_op("gelu_and_mul", self, x)
 
 
 __all__ = ["SiluAndMulFL", "GeluAndMulFL"]

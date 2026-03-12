@@ -12,9 +12,9 @@ import torch
 
 
 def rms_norm_cuda(
+    obj,
     x: torch.Tensor,
     residual: Optional[torch.Tensor] = None,
-    obj=None,
 ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     """
     RMS normalization using CUDA.

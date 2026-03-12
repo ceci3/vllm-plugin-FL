@@ -66,8 +66,9 @@ from vllm.model_executor.models.qwen3_next import (
     Qwen3NextGatedDeltaNet,
     Qwen3NextModel,
     Qwen3NextSparseMoeBlock,
+    QwenNextMixtureOfExperts,
 )
-from vllm_fl.configs.qwen3_5_moe import Qwen3_5MoeConfig
+from vllm_fl.configs.qwen3_5_moe import Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
 
 logger = init_logger(__name__)
 
@@ -117,15 +118,8 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             prefix=prefix,
         )
 
-    def __init__(
-        self,
-        config,
-        model_config=None,
-        cache_config=None,
-        quant_config=None,
-        speculative_config=None,
-        prefix="",
-    ):
+    def __init__(self, config, model_config=None, cache_config=None,
+                 quant_config=None, speculative_config=None, prefix=""):
         # Call grandparent init to skip Qwen3NextGatedDeltaNet.__init__
         # but set up the same attributes
         nn.Module.__init__(self)
@@ -357,17 +351,13 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         if self.layer_scale:
             self.attn_layer_scale = torch.nn.Parameter(
                 torch.zeros(
-                    1,
-                    1,
-                    config.hidden_size,
+                    1, 1, config.hidden_size,
                     dtype=getattr(config, "dtype", torch.bfloat16),
                 ),
             )
             self.ffn_layer_scale = torch.nn.Parameter(
                 torch.zeros(
-                    1,
-                    1,
-                    config.hidden_size,
+                    1, 1, config.hidden_size,
                     dtype=getattr(config, "dtype", torch.bfloat16),
                 ),
             )
@@ -535,27 +525,18 @@ class Qwen3_5Model(Qwen3NextModel):
                         if "experts.gate_up_proj" in name:
                             loaded_weight = loaded_weight.chunk(2, dim=-2)
                             success_w1 = self.load_fused_expert_weights(
-                                name_mapped,
-                                params_dict,
-                                loaded_weight[0],
-                                "w1",
-                                num_experts,
+                                name_mapped, params_dict,
+                                loaded_weight[0], "w1", num_experts,
                             )
                             success_w3 = self.load_fused_expert_weights(
-                                name_mapped,
-                                params_dict,
-                                loaded_weight[1],
-                                "w3",
-                                num_experts,
+                                name_mapped, params_dict,
+                                loaded_weight[1], "w3", num_experts,
                             )
                             success = success_w1 and success_w3
                         else:
                             success = self.load_fused_expert_weights(
-                                name_mapped,
-                                params_dict,
-                                loaded_weight,
-                                shard_id,
-                                num_experts,
+                                name_mapped, params_dict,
+                                loaded_weight, shard_id, num_experts,
                             )
                         if success:
                             name = name_mapped
@@ -588,7 +569,8 @@ class Qwen3_5Model(Qwen3NextModel):
                         continue
                     if name not in params_dict:
                         logger.warning_once(
-                            f"Parameter {name} not found in params_dict, skip loading"
+                            f"Parameter {name} not found in params_dict, "
+                            "skip loading"
                         )
                         continue
                     param = params_dict[name]
@@ -638,7 +620,9 @@ class Qwen3_5_MoeMixtureOfExperts(MixtureOfExperts):
                 self.moe_layers.append(layer.mlp.experts)
 
         if example_moe is None:
-            raise RuntimeError("No Qwen3_5 MoE layer found in the model.layers.")
+            raise RuntimeError(
+                "No Qwen3_5 MoE layer found in the model.layers."
+            )
 
         self.num_moe_layers = len(self.moe_layers)
         self.num_expert_groups = 1

@@ -63,63 +63,64 @@ class CudaBackend(Backend):
 
     # ==================== Operator Implementations ====================
 
-    def silu_and_mul(self, x: torch.Tensor, obj=None) -> torch.Tensor:
+    def silu_and_mul(self, obj, x: torch.Tensor) -> torch.Tensor:
         """
         SiLU activation followed by element-wise multiplication.
 
         Uses vLLM's native CUDA implementation.
 
         Args:
-            x: Input tensor of shape [..., 2*d]
             obj: The calling obj (for interface consistency)
+            x: Input tensor of shape [..., 2*d]
 
         Returns:
             Output tensor of shape [..., d]
         """
         from .impl.activation import silu_and_mul_cuda
 
-        return silu_and_mul_cuda(x, obj=obj)
+        return silu_and_mul_cuda(obj, x)
 
-    def gelu_and_mul(self, x: torch.Tensor, obj=None) -> torch.Tensor:
+    def gelu_and_mul(self, obj, x: torch.Tensor) -> torch.Tensor:
         """
         GELU activation followed by element-wise multiplication.
 
         Uses vLLM's native CUDA implementation.
 
         Args:
-            x: Input tensor of shape [..., 2*d]
             obj: The calling obj (for interface consistency)
+            x: Input tensor of shape [..., 2*d]
 
         Returns:
             Output tensor of shape [..., d]
         """
         from .impl.activation import gelu_and_mul_cuda
 
-        return gelu_and_mul_cuda(x, obj=obj)
+        return gelu_and_mul_cuda(obj, x)
 
     def rms_norm(
         self,
+        obj,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-        obj = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
         RMS normalization using vLLM's CUDA implementation.
 
         Args:
+            obj: The calling obj (e.g., RMSNorm layer)
             x: Input tensor
             residual: Optional residual tensor
-            obj: The calling obj (e.g., RMSNorm layer)
 
         Returns:
             Normalized tensor, or tuple of (normalized, residual) if residual is provided
         """
         from .impl.normalization import rms_norm_cuda
 
-        return rms_norm_cuda(x, residual, obj=obj)
+        return rms_norm_cuda(obj, x, residual)
 
     def rotary_embedding(
         self,
+        obj,
         query: torch.Tensor,
         key: torch.Tensor,
         cos: torch.Tensor,
@@ -127,12 +128,12 @@ class CudaBackend(Backend):
         position_ids: torch.Tensor,
         rotary_interleaved: bool = False,
         inplace: bool = True,
-        obj=None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Apply rotary position embedding using vLLM's CUDA implementation.
 
         Args:
+            obj: The calling obj (for interface consistency)
             query: Query tensor
             key: Key tensor
             cos: Cosine cache
@@ -140,7 +141,6 @@ class CudaBackend(Backend):
             position_ids: Position indices
             rotary_interleaved: Whether to use interleaved rotary
             inplace: Whether to modify tensors in-place
-            obj: The calling obj (for interface consistency)
 
         Returns:
             Tuple of (embedded_query, embedded_key)
@@ -148,6 +148,7 @@ class CudaBackend(Backend):
         from .impl.rotary import rotary_embedding_cuda
 
         return rotary_embedding_cuda(
+            obj,
             query,
             key,
             cos,
@@ -155,7 +156,6 @@ class CudaBackend(Backend):
             position_ids,
             rotary_interleaved=rotary_interleaved,
             inplace=inplace,
-            obj=obj,
         )
 
     def attention_backend(self, use_mla: bool = False, use_sparse: bool = False) -> str:

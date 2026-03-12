@@ -42,12 +42,7 @@ def register_oot_ops(whitelist: Optional[List[str]] = None) -> None:
     Operators in VLLM_FL_OOT_BLACKLIST or platform config oot_blacklist
     will be excluded from registration.
     """
-    from vllm_fl.utils import (
-        get_oot_blacklist,
-        get_oot_whitelist,
-        is_oot_enabled,
-        use_flaggems_op,
-    )
+    from vllm_fl.utils import get_oot_blacklist, get_oot_whitelist, is_oot_enabled, use_flaggems_op
 
     # Check if OOT registration is enabled
     if not is_oot_enabled():

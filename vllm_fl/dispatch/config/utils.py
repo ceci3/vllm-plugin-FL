@@ -1,3 +1,4 @@
+
 # Copyright (c) 2026 BAAI. All rights reserved.
 
 """
@@ -32,7 +33,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, Optional
-from vllm.platforms import current_platform
 
 import yaml
 
@@ -49,7 +49,6 @@ def get_platform_name() -> str:
     """
     try:
         import torch
-
         if hasattr(torch, 'npu') and torch.npu.is_available():
             return 'ascend'
         if "iluvatar" in torch.cuda.get_device_name().lower():
@@ -60,11 +59,11 @@ def get_platform_name() -> str:
         pass
 
     # Check environment variable override
-    platform_override = os.environ.get("VLLM_FL_PLATFORM", "").strip().lower()
+    platform_override = os.environ.get('VLLM_FL_PLATFORM', '').strip().lower()
     if platform_override:
         return platform_override
 
-    return "unknown"
+    return 'unknown'
 
 
 def get_config_path(platform: Optional[str] = None) -> Optional[Path]:
@@ -103,7 +102,7 @@ def load_platform_config(platform: Optional[str] = None) -> Optional[dict[str, A
         return None
 
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
         return config if isinstance(config, dict) else None
     except Exception:
@@ -125,7 +124,7 @@ def get_per_op_order(config: Optional[dict] = None) -> Optional[dict[str, list[s
     if config is None:
         return None
 
-    per_op = config.get("per_op", {})
+    per_op = config.get('per_op', {})
     if not isinstance(per_op, dict):
         return None
 
@@ -154,7 +153,7 @@ def get_flagos_blacklist(config: Optional[dict] = None) -> Optional[list[str]]:
     if config is None:
         return None
 
-    blacklist = config.get("flagos_blacklist", [])
+    blacklist = config.get('flagos_blacklist', [])
     if isinstance(blacklist, list):
         return [str(op) for op in blacklist]
     return None
@@ -175,7 +174,7 @@ def get_oot_blacklist(config: Optional[dict] = None) -> Optional[list[str]]:
     if config is None:
         return None
 
-    blacklist = config.get("oot_blacklist", [])
+    blacklist = config.get('oot_blacklist', [])
     if isinstance(blacklist, list):
         return [str(op) for op in blacklist]
     return None
@@ -195,10 +194,10 @@ def get_effective_config() -> dict[str, Any]:
         Effective configuration dictionary.
     """
     # Check for user-specified config file
-    user_config_path = os.environ.get("VLLM_FL_CONFIG", "").strip()
+    user_config_path = os.environ.get('VLLM_FL_CONFIG', '').strip()
     if user_config_path and os.path.isfile(user_config_path):
         try:
-            with open(user_config_path, "r", encoding="utf-8") as f:
+            with open(user_config_path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
             if isinstance(config, dict):
                 return config
@@ -212,3 +211,4 @@ def get_effective_config() -> dict[str, Any]:
 
     # Return empty config
     return {}
+

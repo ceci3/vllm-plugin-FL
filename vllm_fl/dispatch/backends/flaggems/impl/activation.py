@@ -9,13 +9,13 @@ from __future__ import annotations
 import torch
 
 
-def silu_and_mul_flaggems(x: torch.Tensor, obj=None) -> torch.Tensor:
+def silu_and_mul_flaggems(obj, x: torch.Tensor) -> torch.Tensor:
     """
     SiLU activation followed by element-wise multiplication using FlagGems.
 
     Args:
+        obj: The calling obj (for interface consistency)
         x: Input tensor of shape [..., 2*d]
-        obj: The calling obj (optional, for interface consistency)
 
     Returns:
         Output tensor of shape [..., d]
@@ -27,13 +27,13 @@ def silu_and_mul_flaggems(x: torch.Tensor, obj=None) -> torch.Tensor:
     return gems_silu_and_mul(x1, x2)
 
 
-def gelu_and_mul_flaggems(x: torch.Tensor, obj=None) -> torch.Tensor:
+def gelu_and_mul_flaggems(obj, x: torch.Tensor) -> torch.Tensor:
     """
     GELU activation followed by element-wise multiplication using FlagGems.
 
     Args:
+        obj: The calling obj (for interface consistency)
         x: Input tensor of shape [..., 2*d]
-        obj: The calling obj (optional, for interface consistency)
 
     Returns:
         Output tensor of shape [..., d]

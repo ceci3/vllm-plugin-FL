@@ -4,6 +4,7 @@ import torch
 
 
 def rotary_embedding_maca(
+    obj,
     query: torch.Tensor,
     key: torch.Tensor,
     cos: torch.Tensor,
@@ -11,7 +12,6 @@ def rotary_embedding_maca(
     position_ids: torch.Tensor,
     rotary_interleaved: bool = False,
     inplace: bool = True,
-    obj=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary position embedding using vLLM's CUDA implementation.

@@ -17,7 +17,8 @@ class RotaryEmbeddingFL(RotaryEmbedding):
         dtype: torch.dtype,
     ) -> None:
         super().__init__(
-            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
+            head_size, rotary_dim, max_position_embeddings, base,
+            is_neox_style, dtype
         )
 
     def forward_oot(
@@ -38,8 +39,8 @@ class RotaryEmbeddingFL(RotaryEmbedding):
         query_rot = query[..., : self.rotary_dim]
         key_rot = key[..., : self.rotary_dim]
         if self.rotary_dim < self.head_size:
-            query_pass = query[..., self.rotary_dim :]
-            key_pass = key[..., self.rotary_dim :]
+            query_pass = query[..., self.rotary_dim:]
+            key_pass = key[..., self.rotary_dim:]
 
         cos, sin = self.cos_sin_cache.chunk(2, dim=-1)
 
@@ -53,7 +54,6 @@ class RotaryEmbeddingFL(RotaryEmbedding):
             positions,
             not self.is_neox_style,  # rotary_interleaved
             True,  # inplace
-            obj=self,
         )
 
         if self.rotary_dim < self.head_size:

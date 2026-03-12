@@ -22,15 +22,14 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import (
+from vllm.attention.backends.abstract import(
     AttentionBackend,
     AttentionMetadata,
-    AttentionType,
-    MultipleOf,
-)
+    AttentionType, 
+    MultipleOf)
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.cuda_graph import CUDAGraphStat  # CUDAGraphWrapper
+from vllm.compilation.cuda_graph import CUDAGraphStat #CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
     CompilationMode,
@@ -49,7 +48,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
     is_global_first_rank,
     prepare_communication_buffer_for_model,
-    GraphCaptureContext,
+    GraphCaptureContext
 )
 from vllm.forward_context import (
     BatchDescriptor,
@@ -98,9 +97,7 @@ from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.platform_utils import is_pin_memory_available
 
 from vllm.platforms import current_platform
-
 if current_platform.dist_backend == "flagcx":
-
     @contextmanager
     def graph_capture(device: torch.device):
         """
@@ -117,8 +114,7 @@ if current_platform.dist_backend == "flagcx":
         from other kernels possibly launched on background in the default stream.
         """
         graph_capture_context = GraphCaptureContext(
-            current_platform.torch_device_fn.Stream(device=device)
-        )
+            current_platform.torch_device_fn.Stream(device=device))
         stream = graph_capture_context.stream
 
         # we use nullcontext now
@@ -228,6 +224,7 @@ PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.
 class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
+
     def __init__(
         self,
         model_runner_output: ModelRunnerOutput,
@@ -254,7 +251,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         with current_platform.torch_device_fn.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
             self.sampled_token_ids_cpu = self._sampled_token_ids.to(
-                "cpu", non_blocking=True
+                'cpu', non_blocking=True
             )
             self._logprobs_tensors_cpu = (
                 self._logprobs_tensors.to_cpu_nonblocking()
@@ -265,7 +262,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
-
+        
         This function blocks until the copy is finished.
         """
         max_gen_len = self.sampled_token_ids_cpu.shape[-1]
@@ -286,6 +283,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 self._invalid_req_indices,
                 return_cu_num_tokens=self._logprobs_tensors_cpu is not None,
             )
+
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
@@ -498,11 +496,8 @@ class ModelRunnerFL(
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
-        self.async_output_copy_stream = (
-            current_platform.torch_device_fn.Stream()
-            if self.use_async_scheduling
-            else None
-        )
+        self.async_output_copy_stream = current_platform.torch_device_fn.Stream() if \
+            self.use_async_scheduling else None
         # cuda event to synchronize use of reused CPU tensors between steps
         # when async scheduling is enabled.
         self.prepare_inputs_event: torch.Event | None = None
@@ -621,9 +616,7 @@ class ModelRunnerFL(
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
         self.transfer_event = torch.Event()
         # TODO(yxa): NPU uses int32, CUDA uses int64 for sampled token ids
-        sampled_ids_dtype = (
-            torch.int32 if current_platform.device_type == "npu" else torch.int64
-        )
+        sampled_ids_dtype = torch.int32 if current_platform.device_type == "npu" else torch.int64
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
             dtype=sampled_ids_dtype,
@@ -1461,6 +1454,7 @@ class ModelRunnerFL(
         self.seq_lens.np[num_reqs:].fill(0)
         self.seq_lens.copy_to_gpu()
 
+
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
@@ -1808,6 +1802,7 @@ class ModelRunnerFL(
                 use_cascade_attn |= cascade_attn_prefix_len > 0
 
         return cascade_attn_prefix_lens if use_cascade_attn else None
+
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -3680,7 +3675,7 @@ class ModelRunnerFL(
                 time_after_load = time.perf_counter()
             self.model_memory_usage = m.consumed_memory
         except Exception as e:
-            is_oom = "out of memory" in str(e).lower()
+            is_oom = 'out of memory' in str(e).lower()
 
             if is_oom:
                 msg = (

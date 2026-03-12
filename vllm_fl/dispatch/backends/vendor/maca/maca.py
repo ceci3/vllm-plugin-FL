@@ -62,11 +62,10 @@ class MacaBackend(Backend):
 
     # ==================== Operator Implementations ====================
 
-    def silu_and_mul(self, x: torch.Tensor, obj=None) -> torch.Tensor:
+    def silu_and_mul(self, obj, x: torch.Tensor) -> torch.Tensor:
         """
         SiLU activation followed by element-wise multiplication.
 
-        Uses vLLM's native CUDA implementation.
         Args:
             obj: The calling obj (for interface consistency)
             x: Input tensor of shape [..., 2*d]
@@ -76,13 +75,11 @@ class MacaBackend(Backend):
         """
         from .impl.activation import silu_and_mul_maca
 
-        return silu_and_mul_maca(x, obj=obj)
+        return silu_and_mul_maca(obj, x)
 
-    def gelu_and_mul(self, x: torch.Tensor, obj=None) -> torch.Tensor:
+    def gelu_and_mul(self, obj, x: torch.Tensor) -> torch.Tensor:
         """
         GELU activation followed by element-wise multiplication.
-
-        Uses vLLM's native CUDA implementation.
 
         Args:
             obj: The calling obj (for interface consistency)
@@ -91,25 +88,26 @@ class MacaBackend(Backend):
         Returns:
             Output tensor of shape [..., d]
         """
+        from .impl.activation import gelu_and_mul_maca
 
-        return gelu_and_mul_maca(x, obj=obj)
+        return gelu_and_mul_maca(obj, x)
 
     def rms_norm(
         self,
+        obj,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        weight: torch.Tensor,
-        epsilon: float,
+        residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
-        RMS normalization using vLLM's CUDA implementation.
+        RMS normalization using Maca's CUDA implementation.
         """
         from .impl.layernorm import rms_norm_maca
 
-        return rms_norm_maca(x, residual, weight, epsilon, obj=obj)
+        return rms_norm_maca(obj, x, residual)
 
     def rotary_embedding(
         self,
+        obj,
         query: torch.Tensor,
         key: torch.Tensor,
         cos: torch.Tensor,
@@ -117,7 +115,6 @@ class MacaBackend(Backend):
         position_ids: torch.Tensor,
         rotary_interleaved: bool = False,
         inplace: bool = True,
-        obj=None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Apply rotary position embedding using vLLM's CUDA implementation.
@@ -125,6 +122,7 @@ class MacaBackend(Backend):
         from .impl.rotary_embedding import rotary_embedding_maca
 
         return rotary_embedding_maca(
+            obj,
             query,
             key,
             cos,
@@ -132,7 +130,6 @@ class MacaBackend(Backend):
             position_ids,
             rotary_interleaved=rotary_interleaved,
             inplace=inplace,
-            obj=obj,
         )
 
     def attention_backend(self, use_mla: bool = False, use_sparse: bool = False) -> str:

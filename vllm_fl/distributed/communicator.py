@@ -4,14 +4,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
+from typing import List, Optional, Tuple, Union
 import torch
-from torch.distributed import ProcessGroup
-from vllm.distributed.device_communicators.base_device_communicator import (
-    DeviceCommunicatorBase,
-)
+import torch.distributed as dist
+from torch.distributed import ProcessGroup, ReduceOp
+from vllm.distributed.device_communicators.base_device_communicator import \
+    DeviceCommunicatorBase
 from vllm_fl.distributed.device_communicators.flagcx import PyFlagcxCommunicator
-
 
 class CommunicatorFL(DeviceCommunicatorBase):
     def __init__(
@@ -31,7 +30,6 @@ class CommunicatorFL(DeviceCommunicatorBase):
 
         if self.use_all2all:
             from .all2all import NaiveAll2AllManager
-
             ### naive all2all is device communicator all2all
             self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
             logger.info("Using naive all2all manager.")
@@ -62,20 +60,21 @@ class CommunicatorFL(DeviceCommunicatorBase):
 
         assert input_tensor.shape[0] % world_size == 0
         chunk_size = input_tensor.shape[0] // world_size
-        output_shape = (chunk_size,) + input_tensor.shape[1:]
+        output_shape = (chunk_size, ) + input_tensor.shape[1:]
 
-        output = torch.empty(
-            output_shape, dtype=input_tensor.dtype, device=input_tensor.device
-        )
+        output = torch.empty(output_shape,
+                             dtype=input_tensor.dtype,
+                             device=input_tensor.device)
 
         pyflagcx_comm.reduce_scatter(output, input_tensor)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
 
-    def reduce_scatterv(
-        self, input_: torch.Tensor, dim: int = -1, sizes: Optional[list[int]] = None
-    ):
+    def reduce_scatterv(self,
+                        input_: torch.Tensor,
+                        dim: int = -1,
+                        sizes: Optional[list[int]] = None):
         world_size = self.world_size
         pyflagcx_comm = self.pyflagcx_comm
         assert pyflagcx_comm is not None
@@ -94,11 +93,11 @@ class CommunicatorFL(DeviceCommunicatorBase):
         else:
             assert input_tensor.shape[0] % world_size == 0
             chunk_size = input_tensor.shape[0] // world_size
-        output_shape = (chunk_size,) + input_tensor.shape[1:]
+        output_shape = (chunk_size, ) + input_tensor.shape[1:]
 
-        output = torch.empty(
-            output_shape, dtype=input_tensor.dtype, device=input_tensor.device
-        )
+        output = torch.empty(output_shape,
+                             dtype=input_tensor.dtype,
+                             device=input_tensor.device)
 
         if sizes is not None:
             pyflagcx_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
@@ -120,9 +119,10 @@ class CommunicatorFL(DeviceCommunicatorBase):
         else:
             torch.distributed.send(tensor, self.ranks[dst], self.device_group)
 
-    def recv(
-        self, size: torch.Size, dtype: torch.dtype, src: Optional[int] = None
-    ) -> torch.Tensor:
+    def recv(self,
+             size: torch.Size,
+             dtype: torch.dtype,
+             src: Optional[int] = None) -> torch.Tensor:
         """Receives a tensor from the source rank."""
         """NOTE: `src` is the local rank of the source rank."""
         if src is None:
@@ -142,13 +142,11 @@ class CommunicatorFL(DeviceCommunicatorBase):
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
             self.all2all_manager = None
-
-    def all_gatherv(
-        self,
-        input_: Union[torch.Tensor, list[torch.Tensor]],
-        dim: int = 0,
-        sizes: Optional[list[int]] = None,
-    ):
+    
+    def all_gatherv(self,
+                    input_: Union[torch.Tensor, list[torch.Tensor]],
+                    dim: int = 0,
+                    sizes: Optional[list[int]] = None):
         if dim != 0:
             raise NotImplementedError("only dim 0 all-gatherv is supported")
         world_size = self.world_size
@@ -160,20 +158,20 @@ class CommunicatorFL(DeviceCommunicatorBase):
         if sizes is not None and all(s == sizes[0] for s in sizes):
             sizes = None
 
-        def _all_gather_single(input_: torch.Tensor, sizes: Optional[list[int]] = None):
+        def _all_gather_single(input_: torch.Tensor,
+                               sizes: Optional[list[int]] = None):
             input_size = input_.size()
             if sizes is not None:
                 assert len(sizes) == world_size
                 assert input_.shape[dim] == sizes[self.rank_in_group], (
-                    f"{input_.shape[dim]} != {sizes[self.rank_in_group]}"
-                )
-                output_size = (sum(sizes),) + input_size[1:]
+                    f"{input_.shape[dim]} != {sizes[self.rank_in_group]}")
+                output_size = (sum(sizes), ) + input_size[1:]
             else:
-                output_size = (input_size[0] * world_size,) + input_size[1:]
+                output_size = (input_size[0] * world_size, ) + input_size[1:]
             # Allocate output tensor.
-            output_tensor = torch.empty(
-                output_size, dtype=input_.dtype, device=input_.device
-            )
+            output_tensor = torch.empty(output_size,
+                                        dtype=input_.dtype,
+                                        device=input_.device)
             if sizes is not None:
                 pyflagcx_comm.all_gatherv(output_tensor, input_, sizes=sizes)
             else:
@@ -195,19 +193,17 @@ class CommunicatorFL(DeviceCommunicatorBase):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-        is_sequence_parallel: bool = False,
+        is_sequence_parallel: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert self.all2all_manager is not None
         hidden_states, router_logits = self.all2all_manager.dispatch(
-            hidden_states, router_logits, is_sequence_parallel
-        )
+            hidden_states, router_logits, is_sequence_parallel)
         return hidden_states, router_logits
 
-    def combine(
-        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
-    ) -> torch.Tensor:
+    def combine(self,
+                hidden_states: torch.Tensor,
+                is_sequence_parallel: bool = False) -> torch.Tensor:
         assert self.all2all_manager is not None
-        hidden_states = self.all2all_manager.combine(
-            hidden_states, is_sequence_parallel
-        )
+        hidden_states = self.all2all_manager.combine(hidden_states,
+                                                     is_sequence_parallel)
         return hidden_states

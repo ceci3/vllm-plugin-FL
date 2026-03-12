@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 
-def silu_and_mul_iluvatar(x: torch.Tensor, obj=None) -> torch.Tensor:
+def silu_and_mul_iluvatar(obj, x: torch.Tensor) -> torch.Tensor:
     """
     SiLU activation followed by element-wise multiplication using PyTorch.
 

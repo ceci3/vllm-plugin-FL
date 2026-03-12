@@ -96,7 +96,6 @@ logger = init_logger(__name__)
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
-
 class Qwen3NextSparseMoeBlock(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -358,21 +357,17 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
         self.chunk_gated_delta_rule = ChunkGatedDeltaRuleOp(
-            output_final_state=True,
+            output_final_state = True,
             use_qk_l2norm_in_kernel=True,
         )
 
-        self.fused_recurrent_gated_delta_rule_multi_query = (
-            FusedRecurrentGatedDeltaRuleOp(
-                inplace_final_state=True,
-                use_qk_l2norm_in_kernel=True,
-            )
+        self.fused_recurrent_gated_delta_rule_multi_query = FusedRecurrentGatedDeltaRuleOp(
+            inplace_final_state=True,
+            use_qk_l2norm_in_kernel=True,
         )
-        self.fused_recurrent_gated_delta_rule_remain_query = (
-            FusedRecurrentGatedDeltaRuleOp(
-                inplace_final_state=True,
-                use_qk_l2norm_in_kernel=True,
-            )
+        self.fused_recurrent_gated_delta_rule_remain_query = FusedRecurrentGatedDeltaRuleOp(
+            inplace_final_state=True,
+            use_qk_l2norm_in_kernel=True,
         )
 
     def fix_query_key_value_ordering(
@@ -632,20 +627,16 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            core_attn_out_spec, last_recurrent_state = (
-                self.fused_recurrent_gated_delta_rule_multi_query(
-                    q=query_spec,
-                    k=key_spec,
-                    v=value_spec,
-                    g=g_spec,
-                    beta=beta_spec,
-                    initial_state=ssm_state,
-                    cu_seqlens=spec_query_start_loc[
-                        : attn_metadata.num_spec_decodes + 1
-                    ],
-                    ssm_state_indices=spec_state_indices_tensor,
-                    num_accepted_tokens=num_accepted_tokens,
-                )
+            core_attn_out_spec, last_recurrent_state = self.fused_recurrent_gated_delta_rule_multi_query(
+                q=query_spec,
+                k=key_spec,
+                v=value_spec,
+                g=g_spec,
+                beta=beta_spec,
+                initial_state=ssm_state,
+                cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
+                ssm_state_indices=spec_state_indices_tensor,
+                num_accepted_tokens=num_accepted_tokens,
             )
         else:
             core_attn_out_spec, last_recurrent_state = None, None

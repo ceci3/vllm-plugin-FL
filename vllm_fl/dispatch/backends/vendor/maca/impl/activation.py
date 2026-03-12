@@ -7,7 +7,7 @@ from vllm.model_executor.layers.activation import (
 )
 
 
-def silu_and_mul_maca(x: torch.Tensor, obj=None) -> torch.Tensor:
+def silu_and_mul_maca(obj, x: torch.Tensor) -> torch.Tensor:
     """
     SiLU activation followed by element-wise multiplication using CUDA.
 
@@ -24,7 +24,7 @@ def silu_and_mul_maca(x: torch.Tensor, obj=None) -> torch.Tensor:
     return act_fn.forward_cuda(x)
 
 
-def gelu_and_mul_maca(x: torch.Tensor, obj=None) -> torch.Tensor:
+def gelu_and_mul_maca(obj, x: torch.Tensor) -> torch.Tensor:
     """
     GELU activation followed by element-wise multiplication using CUDA.
 

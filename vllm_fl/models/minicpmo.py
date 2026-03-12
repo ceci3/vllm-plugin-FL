@@ -72,11 +72,7 @@ from vllm.model_executor.models.minicpmv import (
     MiniCPMVProcessingInfo,
     _minicpmv_field_config,
 )
-from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
-    cast_overflow_tensors,
-    maybe_prefix,
-)
+from vllm.model_executor.models.utils import AutoWeightsLoader, cast_overflow_tensors, maybe_prefix
 
 CPU_DEVICE = torch.device("cpu")
 
@@ -99,7 +95,7 @@ class MiniCPMOAudioFeatureInputs(TensorSchema):
     ]
     """
     Slice here means chunk. Audio that is too long will be split into slices,
-    which is the same as image. Padding is used therefore `audio_features` is
+    which is the same as image. Padding is used therefore `audio_features` is 
     `torch.Tensor`.
     """
 
@@ -108,7 +104,7 @@ class MiniCPMOAudioFeatureInputs(TensorSchema):
         TensorShape("bn", "s"),
     ]
     """
-    This should be feature length of each audio slice,
+    This should be feature length of each audio slice, 
     which equals to `audio_features.shape[-1]`
     """
 
@@ -772,7 +768,6 @@ class MiniCPMO2_6(MiniCPMOBaseModel, MiniCPMV2_6):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # Skip MiniCPMV2_6.__init__ version assertion, call MiniCPMVBaseModel directly
         from vllm.model_executor.models.minicpmv import MiniCPMVBaseModel
-
         MiniCPMVBaseModel.__init__(self, vllm_config=vllm_config, prefix=prefix)
         # Override version for MiniCPM-O 2.6
         self.version = (2, 6)
@@ -787,7 +782,6 @@ class MiniCPMO4_5(MiniCPMOBaseModel, MiniCPMV4_5):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # Skip MiniCPMV4_5.__init__ version assertion, call MiniCPMVBaseModel directly
         from vllm.model_executor.models.minicpmv import MiniCPMVBaseModel
-
         MiniCPMVBaseModel.__init__(self, vllm_config=vllm_config, prefix=prefix)
         # Override version for MiniCPM-O 4.5
         self.version = (4, 5)
@@ -824,7 +818,7 @@ class MiniCPMO(MiniCPMOBaseModel, MiniCPMV2_6):
             version = tuple([int(x) for x in version])
         else:
             # Auto-detect version based on config features:
-            # - MiniCPM-o 4.5 (Qwen3 backbone): has head_dim attribute,
+            # - MiniCPM-o 4.5 (Qwen3 backbone): has head_dim attribute, 
             #   hidden_size=4096, num_hidden_layers=36
             # - MiniCPM-o 2.6 (Qwen2 backbone): no head_dim, different arch
             has_head_dim = hasattr(config, "head_dim")

@@ -18,7 +18,6 @@ def rotary_embedding_torch(
     position_ids: torch.Tensor,
     rotary_interleaved: bool = False,
     inplace: bool = True,
-    obj=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary position embedding using PyTorch.

@@ -75,9 +75,7 @@ def register_builtins(registry: OpRegistry) -> None:
     """
     # Register FlagGems (DEFAULT) implementations
     try:
-        from .backends.flaggems.register_ops import (
-            register_builtins as register_flaggems,
-        )
+        from .backends.flaggems.register_ops import register_builtins as register_flaggems
 
         register_flaggems(registry)
         logger.debug("Registered FlagGems operators")
@@ -86,9 +84,7 @@ def register_builtins(registry: OpRegistry) -> None:
 
     # Register PyTorch (REFERENCE) implementations
     try:
-        from .backends.reference.register_ops import (
-            register_builtins as register_reference,
-        )
+        from .backends.reference.register_ops import register_builtins as register_reference
 
         register_reference(registry)
         logger.debug("Registered Reference operators")
@@ -101,7 +97,6 @@ def register_builtins(registry: OpRegistry) -> None:
     # Discover and register external plugins
     try:
         from .discovery import discover_plugins
-
         plugin_count = discover_plugins(registry)
         if plugin_count > 0:
             logger.debug(f"Registered {plugin_count} external plugins")
