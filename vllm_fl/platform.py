@@ -117,6 +117,13 @@ class PlatformFL(Platform):
                 logger.warning("Failed to import mcoplib._moe_C")
 
     @classmethod
+    def pre_register_and_update(
+        cls, parser = None
+    ) -> None:
+        if cls.device_name == "metax":
+            import vllm_fl.dispatch.backends.vendor.maca.patches
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config

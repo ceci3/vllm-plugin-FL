@@ -207,3 +207,7 @@ class CommunicatorFL(DeviceCommunicatorBase):
         hidden_states = self.all2all_manager.combine(hidden_states,
                                                      is_sequence_parallel)
         return hidden_states
+
+
+
+

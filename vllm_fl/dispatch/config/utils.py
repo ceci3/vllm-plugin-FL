@@ -48,13 +48,8 @@ def get_platform_name() -> str:
         Platform name string: 'ascend', 'iluvatar', 'cuda', or 'unknown'
     """
     try:
-        import torch
-        if hasattr(torch, 'npu') and torch.npu.is_available():
-            return 'ascend'
-        if "iluvatar" in torch.cuda.get_device_name().lower():
-            return 'iluvatar'
-        if torch.cuda.is_available():
-            return current_platform.device_name
+        from vllm.platforms import current_platform
+        return current_platform.device_name
     except ImportError:
         pass
 
