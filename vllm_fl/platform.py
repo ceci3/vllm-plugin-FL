@@ -116,12 +116,10 @@ class PlatformFL(Platform):
             except ImportError:
                 logger.warning("Failed to import mcoplib._moe_C")
 
-    @classmethod
-    def pre_register_and_update(
-        cls, parser = None
-    ) -> None:
-        if cls.device_name == "metax":
-            import vllm_fl.dispatch.backends.vendor.maca.patches
+            try:
+                import vllm_fl.dispatch.backends.vendor.maca.patches  # noqa: F401
+            except Exception as e:
+                logger.warning(f"Failed to import maca patches: {e}")
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
