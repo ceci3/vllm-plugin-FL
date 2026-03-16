@@ -152,10 +152,6 @@ class MacaFlashAttentionBackend(AttentionBackend):
         raise NotImplementedError(
             "FP8 dtype is not supported for FlashAttention on Maca."
         )
-        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            return torch.float8_e4m3fn
-        else:
-            raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
