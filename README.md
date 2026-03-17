@@ -20,13 +20,13 @@ In theory, vllm-plugin-FL can support all models available in vLLM, as long as n
 | Chip Vendor | Status | Reference |
 |-------------|--------|-----------|
 | NVIDIA | Supported | - |
-| Ascend | Merging | [PR #55](https://github.com/flagos-ai/vllm-plugin-FL/pull/55) |
-| MetaX | Merging | [PR #47](https://github.com/flagos-ai/vllm-plugin-FL/pull/47) |
+| Ascend | Supported | - |
+| MetaX | Merging | [PR #90](https://github.com/flagos-ai/vllm-plugin-FL/pull/90) |
 | Pingtouge-Zhenwu | Supported | - |
 | Iluvatar | Supported | - |
 | Tsingmicro | Merging | [PR #52](https://github.com/flagos-ai/vllm-plugin-FL/pull/52) |
 | Moore Threads | Supporting | - |
-| Hygon | Supporting | - |
+| Hygon | Merging | [PR #78](https://github.com/flagos-ai/vllm-plugin-FL/pull/78) |
 
 ## Quick Start
 
