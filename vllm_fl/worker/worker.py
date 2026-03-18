@@ -65,8 +65,8 @@ from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_fl.envs as fl_envs
 
-from vllm_fl.utils import get_flag_gems_whitelist_blacklist
 from vllm_fl.ops.custom_ops import register_oot_ops
+from vllm_fl.utils import get_flag_gems_whitelist_blacklist
 
 logger = init_logger(__name__)
 
@@ -205,7 +205,6 @@ class WorkerFL(WorkerBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
-
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils.import_utils import init_cached_hf_modules
@@ -381,6 +380,15 @@ class WorkerFL(WorkerBase):
             current_platform.dist_backend,
         )
 
+        if current_platform.device_type == "npu":
+            from vllm_fl.dispatch.backends.vendor.ascend.impl.fused_moe.ascend_config import (
+                init_ascend_config,
+            )
+            from vllm_fl.dispatch.backends.vendor.ascend.impl.triton_utils import (
+                    init_device_properties_triton,
+            )
+            init_ascend_config(self.vllm_config)
+            init_device_properties_triton()
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -505,8 +513,7 @@ class WorkerFL(WorkerBase):
             GiB(self.requested_memory),
         )
         logger.debug(
-            "Free memory after profiling: %.2f GiB (total), "
-            "%.2f GiB (within requested)",
+            "Free memory after profiling: %.2f GiB (total), %.2f GiB (within requested)",
             GiB(free_gpu_memory),
             GiB(free_gpu_memory - unrequested_memory),
         )

@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import functools
 import gc
 import itertools
@@ -25,7 +26,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import(
     AttentionBackend,
     AttentionMetadata,
-    AttentionType, 
+    AttentionType,
     MultipleOf)
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.compilation.counter import compilation_counter
@@ -84,6 +85,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
@@ -214,8 +216,33 @@ if TYPE_CHECKING:
 
 from vllm_fl.compilation.graph import GraphWrapper
 
-
 logger = init_logger(__name__)
+
+# ── IO inspect/dump step tracking ──
+# Cached references resolved on first call; thereafter a single bool check
+# per execute_model call when IO features are disabled.
+_io_advance_step = None
+_io_inspect_enabled = None
+_io_dump_enabled = None
+
+
+def _maybe_advance_io_step() -> None:
+    """Advance the IO step counter if IO inspect or dump is active.
+
+    Lazy-imports on first call to avoid import-time overhead.
+    Subsequent calls cost one bool-check each when features are off.
+    """
+    global _io_advance_step, _io_inspect_enabled, _io_dump_enabled
+    if _io_advance_step is None:
+        from vllm_fl.dispatch.io_common import advance_step
+        from vllm_fl.dispatch.io_inspector import is_inspect_enabled
+        from vllm_fl.dispatch.io_dumper import is_dump_enabled
+        _io_advance_step = advance_step
+        _io_inspect_enabled = is_inspect_enabled
+        _io_dump_enabled = is_dump_enabled
+    if _io_inspect_enabled() or _io_dump_enabled():
+        _io_advance_step()
+
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
@@ -224,7 +251,6 @@ PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 # Wrapper for ModelRunnerOutput to support overlapped execution.
 class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
-
     def __init__(
         self,
         model_runner_output: ModelRunnerOutput,
@@ -262,7 +288,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
-        
+
         This function blocks until the copy is finished.
         """
         max_gen_len = self.sampled_token_ids_cpu.shape[-1]
@@ -283,7 +309,6 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 self._invalid_req_indices,
                 return_cu_num_tokens=self._logprobs_tensors_cpu is not None,
             )
-
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
@@ -1454,7 +1479,6 @@ class ModelRunnerFL(
         self.seq_lens.np[num_reqs:].fill(0)
         self.seq_lens.copy_to_gpu()
 
-
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
@@ -1573,7 +1597,7 @@ class ModelRunnerFL(
 
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
-            attn_metadata = [dict() for _ in range(len(ubatch_slices))]
+            attn_metadata = [{} for _ in range(len(ubatch_slices))]
 
         if for_cudagraph_capture:
             # For some attention backends (e.g. FA) with sliding window models we need
@@ -3191,6 +3215,11 @@ class ModelRunnerFL(
             cudagraph_stats,
         )
         self.kv_connector_output = kv_connector_output
+
+        # Advance IO step after the forward pass completes so that
+        # step 0 = first forward, step 1 = second forward, etc.
+        _maybe_advance_io_step()
+
         return None
 
     @torch.inference_mode
@@ -3694,6 +3723,30 @@ class ModelRunnerFL(
             time_after_load - time_before_load,
             scope="local",
         )
+
+        # Always register module paths — cheap (one pass over named_modules)
+        # and required by all three IO configuration methods (env vars, YAML,
+        # and the Python API) for layer-path filtering to work.
+        from vllm_fl.dispatch.io_common import register_module_paths, set_eager_mode
+        register_module_paths(self.model)
+        # Tell the IO system whether torch.compile will be used so it can
+        # skip global module hooks that interfere with AOT autograd.
+        set_eager_mode(getattr(self.model_config, "enforce_eager", False))
+        # Initialize IO inspector/dumper from env vars or YAML config.
+        # This must happen AFTER set_eager_mode() so _activate_hooks() knows
+        # whether to register global module hooks (incompatible with torch.compile).
+        _io_env_prefixes = ("VLLM_FL_IO_INSPECT", "VLLM_FL_IO_DUMP",
+                            "VLLM_FL_IO_STEP_RANGE", "VLLM_FL_IO_LAYERS",
+                            "VLLM_FL_IO_RANK")
+        _io_requested = any(
+            k.startswith(_io_env_prefixes) for k in os.environ
+        ) or os.environ.get("VLLM_FL_CONFIG", "").strip()
+        if _io_requested:
+            from vllm_fl.dispatch.io_inspector import _init_from_env as _init_inspect
+            from vllm_fl.dispatch.io_dumper import _init_from_env as _init_dump
+            _init_inspect()
+            _init_dump()
+
         prepare_communication_buffer_for_model(self.model)
         if (drafter := getattr(self, "drafter", None)) and (
             drafter_model := getattr(drafter, "model", None)
@@ -3911,7 +3964,7 @@ class ModelRunnerFL(
     ) -> dict[str, int]:
         try:
             if logits is None:
-                return {req_id: 0 for req_id in self.input_batch.req_ids}
+                return dict.fromkeys(self.input_batch.req_ids, 0)
 
             num_nans_in_logits = {}
             num_nans_for_index = logits.isnan().sum(dim=-1).cpu().numpy()
@@ -4216,7 +4269,6 @@ class ModelRunnerFL(
                 num_tokens_padded = ubatch_slices_padded[0].num_tokens
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
-
             with (
                 self.maybe_randomize_inputs(input_ids, inputs_embeds),
                 set_forward_context(
@@ -5232,8 +5284,7 @@ class ModelRunnerFL(
                     )
                     # Maintain original KV shape view.
                     inv_order = [
-                        kv_cache_stride_order.index(i)
-                        for i in range(len(kv_cache_stride_order))
+                        kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
                     ]
                     kv_caches[layer_name] = (
                         kv_cache_raw_tensors[layer_name]

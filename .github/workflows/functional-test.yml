@@ -63,6 +63,14 @@ jobs:
           pip install -e .
           pip install pytest pytest-timeout modelscope>=1.18.1
 
+      - name: Install DeepGEMM
+        run: |
+          git clone https://github.com/deepseek-ai/DeepGEMM.git /tmp/DeepGEMM
+          cd /tmp/DeepGEMM
+          git checkout 35c4bc8
+          git submodule update --init --recursive
+          pip install --no-build-isolation .
+
       - name: Run functional ops tests
         run: |
           pytest tests/functional_tests/ops/ \
@@ -71,9 +79,14 @@ jobs:
 
       - name: Run inference tests
         run: |
-          pytest tests/functional_tests/inference/ \
-            --ignore=tests/functional_tests/inference/test_offline_qwen3_next.py \
-            -v --tb=short -s
+          exit_code=0
+          for f in tests/functional_tests/inference/test_*.py; do
+            echo "========== Running $f =========="
+            if ! pytest "$f" -v --tb=short -s; then
+              exit_code=1
+            fi
+          done
+          exit $exit_code
 
       - name: Run serving tests
         run: |

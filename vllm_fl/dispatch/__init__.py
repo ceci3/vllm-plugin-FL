@@ -104,6 +104,16 @@ from .discovery import (
     PLUGIN_MODULES_ENV,
 )
 from .logger_manager import get_logger, set_log_level
+from .io_inspector import (
+    enable_io_inspect,
+    disable_io_inspect,
+)
+from .io_dumper import (
+    enable_io_dump,
+    disable_io_dump,
+    io_dump_step,
+)
+from .io_common import list_model_layers, register_tensor_stat, tensor_stats
 
 
 def call_op(op_name: str, *args, **kwargs):
@@ -172,6 +182,15 @@ __all__ = [
     # Logging
     "get_logger",
     "set_log_level",
+    # IO Inspect & Dump
+    "enable_io_inspect",
+    "disable_io_inspect",
+    "enable_io_dump",
+    "disable_io_dump",
+    "io_dump_step",
+    "list_model_layers",
+    "register_tensor_stat",
+    "tensor_stats",
     # Convenience functions
     "call_op",
     "resolve_op",

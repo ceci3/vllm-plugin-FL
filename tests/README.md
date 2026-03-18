@@ -26,6 +26,7 @@ tests/
 │   │   ├── test_numerical.py
 │   │   └── test_rotary_embedding.py
 │   ├── worker/                  # Worker tests
+│   │   ├── test_model_imports.py
 │   │   ├── test_model_runner.py
 │   │   └── test_worker.py
 │   └── flaggems/                # FlagGems integration tests

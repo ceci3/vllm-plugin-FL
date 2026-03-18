@@ -18,8 +18,7 @@ except (ImportError, OSError):
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
-
-from vllm.platforms import Platform, PlatformEnum, logger
+from vllm.platforms import Platform, PlatformEnum
 from vllm.platforms.interface import DeviceCapability
 
 if TYPE_CHECKING:
@@ -37,6 +36,11 @@ logger = init_logger(__name__)
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
+dist_backend_dict = {
+    "npu": "hccl",
+    "cuda": "nccl",
+}
+
 
 class PlatformFL(Platform):
     _enum = PlatformEnum.OOT
@@ -51,7 +55,9 @@ class PlatformFL(Platform):
     dispatch_key = device_info.dispatch_key
     torch_device_fn = device_info.torch_device_fn
     ray_device_key: str = "GPU"
-    dist_backend: str = "flagcx" if "FLAGCX_PATH" in os.environ else "nccl"
+    dist_backend: str = (
+        "flagcx" if "FLAGCX_PATH" in os.environ else dist_backend_dict.get(device_name, "nccl")
+    )
     ### TODO(lms): dispatch device_control_env_var
     # device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
@@ -320,6 +326,12 @@ class PlatformFL(Platform):
         if cls.dist_backend == "flagcx":
             return False
         return True
+
+    @classmethod
+    def pre_register_and_update(cls, parser = None) -> None:
+        if cls.device_name == "npu":
+            import vllm_fl.dispatch.backends.vendor.ascend
+
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
