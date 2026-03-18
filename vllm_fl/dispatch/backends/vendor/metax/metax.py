@@ -21,11 +21,11 @@ from vllm.attention.backends.registry import AttentionBackendEnum, register_back
 def register_attention_backends():
     register_backend(
         AttentionBackendEnum.FLASHMLA,
-        class_path="vllm_fl.dispatch.backends.vendor.maca.impl.attention.mla.flashmla.MacaFlashMLABackend",
+        class_path="vllm_fl.dispatch.backends.vendor.metax.impl.attention.mla.flashmla.MacaFlashMLABackend",
     )
     register_backend(
         AttentionBackendEnum.FLASH_ATTN,
-        class_path="vllm_fl.dispatch.backends.vendor.maca.impl.attention.flash_attn.MacaFlashAttentionBackend",
+        class_path="vllm_fl.dispatch.backends.vendor.metax.impl.attention.flash_attn.MacaFlashAttentionBackend",
     )
 
 

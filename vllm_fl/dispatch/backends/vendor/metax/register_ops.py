@@ -31,7 +31,7 @@ def register_builtins(registry) -> None:
     Args:
         registry: Registry to register into
     """
-    from .maca import MacaBackend
+    from .metax import MacaBackend
 
     backend = MacaBackend()
     is_avail = backend.is_available

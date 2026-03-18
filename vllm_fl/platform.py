@@ -122,7 +122,7 @@ class PlatformFL(Platform):
                 logger.warning("Failed to import mcoplib._moe_C")
 
             try:
-                import vllm_fl.dispatch.backends.vendor.maca.patches  # noqa: F401
+                import vllm_fl.dispatch.backends.vendor.metax.patches  # noqa: F401
             except Exception as e:
                 logger.warning(f"Failed to import maca patches: {e}")
 

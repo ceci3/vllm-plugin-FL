@@ -4,7 +4,7 @@
 MACA backend for vllm-plugin-FL dispatch.
 """
 
-from .maca import MacaBackend
+from .metax import MacaBackend
 
 __all__ = [
     "MacaBackend",
