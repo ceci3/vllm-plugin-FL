@@ -11,7 +11,7 @@ Configuration Priority (highest to lowest):
 1. VLLM_FL_CONFIG: User-specified config file path (complete override)
 2. Environment variables: Override specific items from platform config
    - VLLM_FL_PREFER: Backend preference (flagos, vendor, reference)
-   - VLLM_FL_STRICT: Strict mode (1 or 0)
+   - VLLM_FL_STRICT: Strict mode: 1 = fail immediately on error (no fallback), 0 = try fallback (default)
    - VLLM_FL_PER_OP: Per-operator backend order
    - VLLM_FL_FLAGOS_BLACKLIST: FlagOS operator blacklist
    - VLLM_FL_OOT_BLACKLIST: OOT operator blacklist
