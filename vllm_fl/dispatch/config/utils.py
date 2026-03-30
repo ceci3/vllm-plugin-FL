@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+from vllm_fl.utils import VENDOR_DEVICE_MAP
 
 # Directory containing config files (config/)
 _CONFIG_DIR = Path(__file__).parent
