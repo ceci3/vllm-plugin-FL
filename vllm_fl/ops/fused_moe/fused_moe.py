@@ -8,7 +8,6 @@ from typing import Optional
 import functools
 import torch
 import torch.nn.functional as F
-import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEQuantConfig,
@@ -17,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     _get_config_quant_dtype,
     try_get_optimal_moe_config,
-    invoke_fused_moe_kernel,
+    dispatch_fused_moe_kernel,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.triton_utils import tl
@@ -109,7 +108,9 @@ def fused_experts_impl(
     top_k_num = topk_ids.size(1)
     # We execute the fused_moe kernel in chunks to circumvent this issue:
     # https://github.com/vllm-project/vllm/issues/5938
-    CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
+    # Note: upstream removed VLLM_FUSED_MOE_CHUNK_SIZE in v0.18.1;
+    # keep the old default (64K) for the FL chunked implementation.
+    CHUNK_SIZE = 65536
     M = min(num_tokens, CHUNK_SIZE)
 
     config_dtype = _get_config_dtype_str(
@@ -209,7 +210,7 @@ def fused_experts_impl(
             ignore_invalid_experts=True,
         )
 
-        invoke_fused_moe_kernel(
+        dispatch_fused_moe_kernel(
             qcurr_hidden_states,
             w1,
             intermediate_cache1,
@@ -235,6 +236,9 @@ def fused_experts_impl(
 
         # Activation function with multiplication
         # todo: dispatch to flag_gems and other backends
+        # v0.18.1: activation may be a MoEActivation enum; normalize to str
+        if hasattr(activation, "value"):
+            activation = activation.value
         if activation == "silu":
             intermediate_cache2 = call_op(
                 "silu_and_mul", None, intermediate_cache1.view(-1, N)
@@ -262,7 +266,7 @@ def fused_experts_impl(
             block_shape=block_shape,
         )
 
-        invoke_fused_moe_kernel(
+        dispatch_fused_moe_kernel(
             qintermediate_cache2,
             w2,
             intermediate_cache3,

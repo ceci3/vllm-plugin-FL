@@ -13,8 +13,8 @@ def patch_mm_encoder_attention():
     FLASH_ATTN branch to import directly from vllm.vllm_flash_attn with a
     fallback to flash_attn.
     """
-    import vllm.attention.layers.mm_encoder_attention as mm_mod
-    from vllm.attention.backends.registry import AttentionBackendEnum
+    import vllm.model_executor.layers.attention.mm_encoder_attention as mm_mod
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     def _patched_maybe_get_vit_flash_attn_backend(attn_backend):
         if attn_backend == AttentionBackendEnum.FLASH_ATTN:

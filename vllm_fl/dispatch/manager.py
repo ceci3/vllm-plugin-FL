@@ -483,11 +483,8 @@ class OpManager:
         """
         Resolve and call an operator implementation with optional fallback support.
 
-        Behavior is controlled by the active policy's strict flag (VLLM_FL_STRICT):
-          - VLLM_FL_STRICT=0 (default): fallback mode — if the primary implementation
-            fails, the system automatically tries the next available implementation.
-          - VLLM_FL_STRICT=1: strict mode — fail immediately on the first error,
-            no fallback is attempted.
+        When VLLM_FL_STRICT=1, this method will try alternative implementations
+        if the primary one fails. Otherwise, it behaves like the original implementation.
 
         Logs on first call or when the implementation changes (e.g., backend switch).
 
@@ -499,10 +496,10 @@ class OpManager:
             Result from the implementation
 
         Raises:
-            RuntimeError: If all implementations fail (fallback mode) or
-                         if the primary implementation fails (strict mode)
+            RuntimeError: If all implementations fail (when fallback enabled) or
+                         if the primary implementation fails (when fallback disabled)
         """
-        enable_fallback = not get_policy().strict
+        enable_fallback = os.getenv("VLLM_FL_STRICT", "1") != "0"
 
         if not enable_fallback:
             # Original behavior: use cached resolve() and fast-fail

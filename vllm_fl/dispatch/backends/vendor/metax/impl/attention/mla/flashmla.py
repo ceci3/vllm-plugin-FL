@@ -7,7 +7,7 @@ from typing import ClassVar
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionLayer, AttentionType, MultipleOf
+from vllm.v1.attention.backend import AttentionLayer, AttentionType, MultipleOf
 from ..ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
@@ -17,7 +17,7 @@ from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
+    _batch_invariant_MODE as _bi_mode,
 )
 from vllm.platforms.interface import DeviceCapability
 from .common import (
@@ -28,13 +28,13 @@ from .common import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import (
-    AttentionCGSupport,
     reshape_attn_output_for_spec_decode,
     reshape_query_for_spec_decode,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.attention.backends.registry import AttentionBackendEnum, register_backend
+from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 
 logger = init_logger(__name__)
 
@@ -271,7 +271,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
         tile_scheduler_metadata = attn_metadata.decode.tile_scheduler_metadata
         num_splits = attn_metadata.decode.num_splits
-        if vllm_is_batch_invariant():
+        if _bi_mode:
             device = q.device
             dtype = torch.int32
 

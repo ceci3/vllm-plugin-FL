@@ -1,4 +1,4 @@
-from vllm.attention.backends.registry import (
+from vllm.v1.attention.backends.registry import (
     AttentionBackendEnum,
     register_backend,
 )

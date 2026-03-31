@@ -11,8 +11,8 @@ from functools import partial
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
-from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
-from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
+from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import RoutingSimulator
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import grouped_topk
 from vllm.platforms import current_platform
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
@@ -21,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 
 
 if current_platform.is_cuda_alike():
-    from vllm.model_executor.layers.fused_moe.fused_moe import (
+    from vllm.model_executor.layers.fused_moe.router.base_router import (
         eplb_map_to_physical_and_record,
     )
 else:
@@ -76,7 +76,30 @@ class UnquantizedFusedMoEMethodFL(UnquantizedFusedMoEMethod):
         else:
             return result
 
-    forward_native = forward_oot
+    def forward_native(
+        self,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """v0.18.1 forward_native signature — called when custom ops are
+        disabled (e.g. under torch.compile / Inductor).
+        Note: shared experts are handled by the upstream runner
+        (_apply_quant_method), so we must NOT return a tuple here."""
+        return fused_experts(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=layer.activation,
+            quant_config=self.moe_quant_config,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+        )
 
 
 class FusedMoEFL(FusedMoE):
@@ -127,7 +150,7 @@ class FusedMoEFL(FusedMoE):
             plain MoE implementations without redundant experts.
         """
         from vllm_fl.ops.fused_moe.fused_moe import fused_topk
-        from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk_bias
+        from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import fused_topk_bias
 
         if self.enable_eplb:
             if self.quant_method.supports_eplb:

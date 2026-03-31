@@ -174,7 +174,7 @@ class CudaBackend(Backend):
         Returns:
             Fully qualified class path string
         """
-        from vllm.attention.backends.registry import AttentionBackendEnum
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         if use_mla:
             if use_sparse:

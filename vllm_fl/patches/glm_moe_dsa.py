@@ -52,25 +52,6 @@ def patch_tokenizer_compat():
         pass
 
 
-def patch_is_deepseek_mla():
-    """Patch ModelConfig.is_deepseek_mla to recognise glm_moe_dsa as MLA."""
-    from vllm.config.model import ModelConfig
-    _orig_is_mla = ModelConfig.is_deepseek_mla.fget
-
-    @property
-    def _patched_is_mla(self):
-        if (
-            hasattr(self.hf_text_config, "model_type")
-            and self.hf_text_config.model_type == "glm_moe_dsa"
-            and getattr(self.hf_text_config, "kv_lora_rank", None)
-            is not None
-        ):
-            return True
-        return _orig_is_mla(self)
-
-    ModelConfig.is_deepseek_mla = _patched_is_mla
-
-
 def patch_fp8_mqa_logits_dim():
     """Fix k_scale dim mismatch for deep_gemm fp8_mqa_logits.
 
@@ -222,6 +203,5 @@ def patch_indexer_rope_reshape():
 
 def apply_model_patches():
     """All GLM-5 patches needed at model registration time."""
-    patch_is_deepseek_mla()
     patch_indexer_schedule_metadata()
     patch_indexer_rope_reshape()

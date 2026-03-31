@@ -9,15 +9,15 @@ from typing import ClassVar
 import numpy as np
 import torch
 
-from vllm.attention.backends.abstract import (
+from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
     MultipleOf,
     is_quantized_kv_cache,
 )
-from vllm.attention.layer import Attention
-from vllm.attention.ops.common import cp_lse_ag_out_rs
+from vllm.model_executor.layers.attention.attention import Attention
+from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 
 # --------------------------------------------------------------
 # Note: use Maca's merge_attn_states to get cuda kernel invoked
@@ -42,13 +42,15 @@ from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
+    _batch_invariant_MODE as _bi_mode,
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
+)
+from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     get_dcp_local_seq_lens,
     get_kv_cache_layout,
@@ -56,7 +58,7 @@ from vllm.v1.attention.backends.utils import (
     reshape_attn_output_for_spec_decode,  # used for prefill decode split with mtp
     reshape_query_for_spec_decode,  # used for prefill decode split with mtp
 )
-from vllm.attention.backends.registry import AttentionBackendEnum, register_backend
+from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 # --------------------------------------------------------------
@@ -450,7 +452,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefill_block_table_tensor = None
         # \------------------------- Metax Modification -------------------------/
 
-        if vllm_is_batch_invariant():
+        if _bi_mode:
             max_num_splits = 1
 
         def schedule(
@@ -645,7 +647,7 @@ class FlashAttentionImpl(AttentionImpl):
         self.attn_type = attn_type
         self.vllm_flash_attn_version = get_flash_attn_version()
         # Cache the batch invariant result for use in forward passes
-        self.batch_invariant_enabled = vllm_is_batch_invariant()
+        self.batch_invariant_enabled = _bi_mode
 
         if is_quantized_kv_cache(self.kv_cache_dtype) and not flash_attn_supports_fp8():
             raise NotImplementedError(

@@ -144,7 +144,7 @@ class FlagGemsBackend(Backend):
         Returns:
             Fully qualified class path string
         """
-        from vllm.attention.backends.registry import AttentionBackendEnum
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         # TritonAttentionBackend requires CUDA, check if available
         if not torch.cuda.is_available():

@@ -198,13 +198,13 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.attention.backends.abstract import (
+from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionLayer,
     MLAAttentionImpl,
 )
-from vllm.attention.backends.utils import get_mla_dims
-from vllm.attention.ops.common import cp_lse_ag_out_rs
+from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
+from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 
 # --------------------------------------------------------------
 # Note: use Maca's merge_attn_states to get cuda kernel invoked
@@ -214,7 +214,7 @@ from ..utils.fa_utils import get_flash_attn_version
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
+    _batch_invariant_MODE as _bi_mode,
 )
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -272,7 +272,9 @@ except ImportError:
     flashinfer_available = False
 
 
-from vllm.v1.attention.backends.mla.common import logger
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 CUDNN_WORKSPACE_SIZE = 12800
 
@@ -1276,7 +1278,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             # ROCm leverages the upstream flash_attn, which takes a parameter
             # called "return_attn_probs" instead of return_softmax_lse
             kwargs["return_attn_probs"] = return_softmax_lse
-        if vllm_is_batch_invariant():
+        if _bi_mode:
             kwargs["num_splits"] = 1
 
         attn_out = self.flash_attn_varlen_func(

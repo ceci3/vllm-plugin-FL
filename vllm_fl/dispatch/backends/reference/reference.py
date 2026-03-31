@@ -150,7 +150,7 @@ class ReferenceBackend(Backend):
             Fully qualified class path string (vLLM native backend)
         """
         # Return vLLM's native flash attention backend as reference
-        from vllm.attention.backends.registry import AttentionBackendEnum
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         if use_mla:
             # vLLM native MLA backend

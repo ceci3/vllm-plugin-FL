@@ -8,7 +8,7 @@ from typing import Optional, Union
 
 import torch
 
-from vllm.attention.backends.abstract import (
+from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
     is_quantized_kv_cache,
@@ -17,7 +17,7 @@ from vllm.attention.backends.abstract import (
 # from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 # from vllm.attention.ops.triton_flash_attention import triton_attention
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.mla.common import (
+from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,

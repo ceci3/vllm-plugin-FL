@@ -28,7 +28,7 @@ from typing import Any, ClassVar, List, Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
-from vllm.attention.backends.abstract import (
+from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
     AttentionLayer,
@@ -36,7 +36,8 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.utils import AttentionCGSupport, CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
 from vllm_fl.dispatch.backends.vendor.ascend.impl.attention_mask import (
     AttentionMaskBuilder,

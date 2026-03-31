@@ -21,7 +21,7 @@ import einops
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.config import MultiModalConfig
 
 MIN_PAD_SIZE = 64  # min_size to pad weight

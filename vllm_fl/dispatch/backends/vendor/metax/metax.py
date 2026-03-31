@@ -14,7 +14,7 @@ import torch
 
 from vllm_fl.dispatch.backends.base import Backend
 
-from vllm.attention.backends.registry import AttentionBackendEnum, register_backend
+from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 
 
 # Register attention backends for MACA
@@ -147,7 +147,7 @@ class MacaBackend(Backend):
         Returns:
             Fully qualified class path string
         """
-        from vllm.attention.backends.registry import AttentionBackendEnum
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         # register before selection
         register_attention_backends()
