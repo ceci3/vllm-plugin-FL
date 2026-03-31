@@ -29,7 +29,7 @@ else:
     VllmConfig = None
     CacheDType = None
 
-from vllm_fl.utils import DeviceInfo
+from vllm_fl.utils import DeviceInfo, get_device_name, get_device_type
 
 logger = init_logger(__name__)
 
@@ -46,6 +46,8 @@ class PlatformFL(Platform):
     _enum = PlatformEnum.OOT
     device_info = DeviceInfo()
     vendor_name = device_info.vendor_name
+    device_type = get_device_type(vendor_name)
+    device_name = get_device_name(vendor_name)
     # cuda_alike (nvidia/metax): device_name = vendor_name (not used in torch.device)
     # non-cuda_alike (iluvatar/ascend): device_name = device_type (used in torch.device)
     device_name = device_info.vendor_name if (
@@ -336,18 +338,16 @@ class PlatformFL(Platform):
         if cls.device_name == "npu":
             import vllm_fl.dispatch.backends.vendor.ascend
 
-    @classmethod
     def supports_fp8(cls) -> bool:
-        return cls.has_device_capability(89)
+        if cls.vendor_name == "nvidia":
+            return True
+        return False
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        if cls.device_type == "npu":
-            return cls.torch_device_fn.get_device_properties(
-                device_id
-            ).total_memory
-        device_props = torch.cuda.get_device_properties(device_id)
-        return device_props.total_memory
+        return cls.torch_device_fn.get_device_properties(
+            device_id
+        ).total_memory
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
@@ -357,7 +357,7 @@ class PlatformFL(Platform):
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
-        return torch.cuda.get_device_properties(device_id).multi_processor_count
+        return cls.torch_device_fn.get_device_properties(device_id).multi_processor_count
 
 
     @classmethod

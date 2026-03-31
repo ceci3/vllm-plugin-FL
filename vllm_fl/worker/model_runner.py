@@ -110,6 +110,40 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.platform_utils import is_pin_memory_available, num_compute_units
+from vllm.platforms import current_platform
+if current_platform.dist_backend == "flagcx":
+    @contextmanager
+    def graph_capture(device: torch.device):
+        """
+        `graph_capture` is a context manager which should surround the code that
+        is capturing the NPU graph. Its main purpose is to ensure that the
+        some operations will be run after the graph is captured, before the graph
+        is replayed. It returns a `GraphCaptureContext` object which contains the
+        necessary data for the graph capture. Currently, it only contains the
+        stream that the graph capture is running on. This stream is set to the
+        current NPU stream when the context manager is entered and reset to the
+        default stream when the context manager is exited. This is to ensure that
+        the graph capture is running on a separate stream from the default stream,
+        in order to explicitly distinguish the kernels to capture
+        from other kernels possibly launched on background in the default stream.
+        """
+        graph_capture_context = GraphCaptureContext(
+            current_platform.torch_device_fn.Stream(device=device))
+        stream = graph_capture_context.stream
+
+        # we use nullcontext now
+        maybe_ca_context = nullcontext()
+
+        # ensure all initialization operations complete before attempting to
+        # capture the graph on another stream
+        curr_stream = current_platform.torch_device_fn.current_stream()
+        if curr_stream != stream:
+            stream.wait_stream(curr_stream)
+
+        with current_platform.torch_device_fn.stream(stream), maybe_ca_context:
+            yield graph_capture_context
+else:
+    from vllm.distributed.parallel_state import graph_capture
 from vllm.utils.torch_utils import (
     get_dtype_size,
     kv_cache_dtype_str_to_dtype,
@@ -223,7 +257,7 @@ from vllm_fl.dispatch.io_dumper import (
     init_io_dump_from_env,
     register_io_module_hooks,
 )
-CUDAGraphWrapper = GraphWrapper
+GraphWrapper = GraphWrapper
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
@@ -822,9 +856,11 @@ class ModelRunnerFL(
 
         self._draft_token_req_ids: list[str] | None = None
         self.transfer_event = torch.Event()
+        # TODO(yxa): NPU uses int32, CUDA uses int64 for sampled token ids
+        sampled_ids_dtype = torch.int32 if current_platform.device_type == "npu" else torch.int64
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
-            dtype=torch.int64,
+            dtype=sampled_ids_dtype,
             device="cpu",
             pin_memory=self.pin_memory,
         )
@@ -1062,7 +1098,7 @@ class ModelRunnerFL(
 
     # Note: used for model runner override.
     def _sync_device(self) -> None:
-        torch.accelerator.synchronize()
+        current_platform.torch_device_fn.synchronize()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         """Update the cached states and the persistent batch with the scheduler
@@ -3008,7 +3044,7 @@ class ModelRunnerFL(
     def get_model(self) -> nn.Module:
         if not hasattr(self, "model"):
             raise ValueError("Cannot get model before model has been initialized")
-        if isinstance(self.model, (CUDAGraphWrapper, UBatchWrapper)):
+        if isinstance(self.model, (GraphWrapper, UBatchWrapper)):
             # get raw model out of the cudagraph wrapper.
             return self.model.unwrap()
         return self.model
@@ -4420,9 +4456,9 @@ class ModelRunnerFL(
         assert self.draft_token_ids_event is not None
         assert self.draft_token_ids_copy_stream is not None
         assert self.draft_token_ids_cpu is not None
-        default_stream = torch.cuda.current_stream()
+        default_stream = current_platform.torch_device_fn.current_stream()
         num_reqs = draft_token_ids.shape[0]
-        with torch.cuda.stream(self.draft_token_ids_copy_stream):
+        with current_platform.torch_device_fn.stream(self.draft_token_ids_copy_stream):
             if not zeros_only:
                 # Trigger async copy of draft token ids to cpu.
                 self.draft_token_ids_copy_stream.wait_stream(default_stream)
@@ -4451,10 +4487,10 @@ class ModelRunnerFL(
         if self.valid_sampled_token_count_event is None:
             return
 
-        default_stream = torch.cuda.current_stream()
+        default_stream = current_platform.torch_device_fn.current_stream()
         # Initialize a new stream to overlap the copy operation with
         # prepare_input of draft model.
-        with torch.cuda.stream(self.valid_sampled_token_count_copy_stream):
+        with current_platform.torch_device_fn.stream(self.valid_sampled_token_count_copy_stream):
             self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)  # type: ignore
             counts = valid_sampled_tokens_count
             counts_cpu = self.valid_sampled_token_count_cpu
@@ -4813,16 +4849,19 @@ class ModelRunnerFL(
                     self.model.set_aux_hidden_state_layers(aux_layers)
                 time_after_load = time.perf_counter()
             self.model_memory_usage = m.consumed_memory
-        except torch.cuda.OutOfMemoryError as e:
-            msg = (
-                "Failed to load model - not enough GPU memory. "
-                "Try lowering --gpu-memory-utilization to free memory for weights, "
-                "increasing --tensor-parallel-size, or using --quantization. "
-                "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
-                "for more tips."
-            )
-            combined_msg = f"{msg} (original error: {e})"
-            logger.error(combined_msg)
+        except Exception as e:
+            is_oom = 'out of memory' in str(e).lower()
+
+            if is_oom:
+                msg = (
+                    "Failed to load model - not enough device memory. "
+                    "Try lowering --gpu-memory-utilization to free memory for weights, "
+                    "increasing --tensor-parallel-size, or using --quantization. "
+                    "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+                    "for more tips."
+                )
+                combined_msg = f"{msg} (original error: {e})"
+                logger.error(combined_msg)
             raise e
         logger.info_once(
             "Model loading took %s GiB memory and %.6f seconds",
@@ -4880,7 +4919,7 @@ class ModelRunnerFL(
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):
-            self.model = CUDAGraphWrapper(
+            self.model = GraphWrapper(
                 self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
             )
         elif self.parallel_config.use_ubatching:
@@ -5897,7 +5936,7 @@ class ModelRunnerFL(
         # Use a temporary pool for profiling to avoid fragmentation in the main pool.
         profiling_pool = current_platform.graph_pool_handle()
         original_pools: dict[int, Any] = {}
-        for instance in list(CUDAGraphWrapper._all_instances):
+        for instance in list(GraphWrapper._all_instances):
             original_pools[id(instance)] = instance.graph_pool
             instance.graph_pool = profiling_pool
 
@@ -5947,8 +5986,8 @@ class ModelRunnerFL(
                 )
 
         set_cudagraph_capturing_enabled(False)
-        CUDAGraphWrapper.clear_all_graphs()
-        for instance in list(CUDAGraphWrapper._all_instances):
+        GraphWrapper.clear_all_graphs()
+        for instance in list(GraphWrapper._all_instances):
             if id(instance) in original_pools:
                 instance.graph_pool = original_pools[id(instance)]
         for key_set in self.cudagraph_dispatcher.cudagraph_keys.values():
@@ -5981,7 +6020,7 @@ class ModelRunnerFL(
             return 0
 
         # Initialize encoder CUDA graph manager if enabled.
-        # Use get_model() to unwrap CUDAGraphWrapper/UBatchWrapper,
+        # Use get_model() to unwrap GraphWrapper/UBatchWrapper,
         # because @runtime_checkable Protocol isinstance() checks do not
         # work through __getattr__ forwarding.
         if (
