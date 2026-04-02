@@ -56,7 +56,7 @@ def register_model():
         from vllm_fl.configs.glm_moe_dsa import GlmMoeDsaConfig
         _CONFIG_REGISTRY["glm_moe_dsa"] = GlmMoeDsaConfig
 
-        from vllm_fl.patches.glm_moe_dsa import apply_model_patches as glm5_model
-        glm5_model()
+        #from vllm_fl.patches.glm_moe_dsa import apply_model_patches as glm5_model
+        #glm5_model()
     except Exception as e:
         logger.error(f"Register GlmMoeDsa model error: {str(e)}")

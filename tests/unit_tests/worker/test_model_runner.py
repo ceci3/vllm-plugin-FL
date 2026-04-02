@@ -60,6 +60,7 @@ class TestExecuteModelState:
             "aux_hidden_states",
             "ec_connector_output",
             "cudagraph_stats",
+            'slot_mappings',
         )
         assert ExecuteModelState._fields == expected_fields, (
             "ExecuteModelState fields changed - this may break execute_model consumers"
@@ -79,6 +80,7 @@ class TestExecuteModelState:
             aux_hidden_states=None,
             ec_connector_output=None,
             cudagraph_stats=None,
+            slot_mappings=None,
         )
 
         with pytest.raises(AttributeError):
@@ -101,6 +103,7 @@ class TestExecuteModelState:
             aux_hidden_states=None,
             ec_connector_output=None,
             cudagraph_stats=None,
+            slot_mappings=None,
         )
 
         # Simulate downstream unpacking

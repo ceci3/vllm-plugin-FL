@@ -13,6 +13,10 @@ import torch
 class TestRMSNormFL:
     """Test RMSNormFL class behavior."""
 
+    def __init__(self):
+        from vllm.config import VllmConfig, set_current_vllm_config
+        set_current_vllm_config(VllmConfig())
+
     @pytest.fixture
     def mock_call_op(self):
         with patch("vllm_fl.ops.layernorm.call_op") as mock:

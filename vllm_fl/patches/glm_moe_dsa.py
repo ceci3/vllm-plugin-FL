@@ -52,33 +52,6 @@ def patch_tokenizer_compat():
         pass
 
 
-def patch_fp8_mqa_logits_dim():
-    """Fix k_scale dim mismatch for deep_gemm fp8_mqa_logits.
-
-    vLLM 0.13.0 passes k_scale as [N, 1] but deep_gemm 2.3.0 expects [N].
-    Upstream fix: https://github.com/vllm-project/vllm/pull/32652
-    We wrap fp8_mqa_logits to flatten k_scale before calling the native impl.
-    """
-    import vllm.utils.deep_gemm as dg_mod
-
-    dg_mod._lazy_init()
-    _orig_impl = dg_mod._fp8_mqa_logits_impl
-    if _orig_impl is None:
-        return
-
-    def _fixed_fp8_mqa_logits(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke):
-        k_fp8, k_scale = kv
-        return _orig_impl(
-            q, (k_fp8, k_scale.flatten()), weights,
-            cu_seqlen_ks, cu_seqlen_ke,
-        )
-
-    dg_mod._fp8_mqa_logits_impl = _fixed_fp8_mqa_logits
-    dg_mod._lazy_init = lambda: None
-    logger.info("Patched fp8_mqa_logits: flatten k_scale [N,1] -> [N] "
-                "for deep_gemm 2.3.0 compat")
-
-
 def patch_indexer_schedule_metadata():
     """Fix schedule_metadata not computed when VLLM_USE_DEEP_GEMM=0.
 
@@ -125,8 +98,6 @@ def patch_indexer_schedule_metadata():
 def apply_platform_patches():
     """All GLM-5 patches needed at platform registration time."""
     patch_tokenizer_compat()
-    patch_fp8_mqa_logits_dim()
-
 
 def patch_indexer_rope_reshape():
     """Fix RoPE output shape in Indexer.forward for DSA models.
