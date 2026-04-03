@@ -60,7 +60,7 @@ class TestExecuteModelState:
             "aux_hidden_states",
             "ec_connector_output",
             "cudagraph_stats",
-            'slot_mappings',
+            "slot_mappings",
         )
         assert ExecuteModelState._fields == expected_fields, (
             "ExecuteModelState fields changed - this may break execute_model consumers"

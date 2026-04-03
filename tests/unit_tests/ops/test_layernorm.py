@@ -15,6 +15,7 @@ class TestRMSNormFL:
 
     def __init__(self):
         from vllm.config import VllmConfig, set_current_vllm_config
+
         set_current_vllm_config(VllmConfig())
 
     @pytest.fixture

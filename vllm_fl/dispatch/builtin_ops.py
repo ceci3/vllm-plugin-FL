@@ -74,9 +74,6 @@ def _register_vendor_backends(registry: OpRegistry) -> None:
         logger.debug(f"Vendor backends directory not found: {_VENDOR_BACKENDS_DIR}")
         return
 
-    for vendor_name in os.listdir(_VENDOR_BACKENDS_DIR):
-        vendor_path = os.path.join(_VENDOR_BACKENDS_DIR, vendor_name)
-
     available_vendor_dirs = {
         vendor_name
         for vendor_name in os.listdir(_VENDOR_BACKENDS_DIR)
