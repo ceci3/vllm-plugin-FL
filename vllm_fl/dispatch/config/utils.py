@@ -46,7 +46,7 @@ def get_platform_name() -> str:
     Detect the current hardware platform.
 
     Returns:
-        Platform name string: 'ascend', 'iluvatar', 'cuda', or 'unknown'
+        Platform name string: 'ascend', 'iluvatar', 'musa', 'cuda', or 'unknown'
     """
     try:
         from vllm.platforms import current_platform

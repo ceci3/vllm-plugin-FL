@@ -24,7 +24,7 @@ _OP_CONFIG: Optional[dict[str, str]] = None
 #   Source: runtime platform detection (current_platform.device_name).
 #
 # Values are normalized to lowercase and matched against available backend
-# subdirectories (for example, cuda/ascend/metax/iluvatar).
+# subdirectories (for example, cuda/ascend/metax/iluvatar/mthreads).
 VENDOR_DEVICE_MAP: dict[str, dict[str, str]] = {
     # Registered backend: vendor/cuda
     "nvidia": {"device_type": "cuda", "device_name": "nvidia"},
@@ -34,6 +34,8 @@ VENDOR_DEVICE_MAP: dict[str, dict[str, str]] = {
     "iluvatar": {"device_type": "cuda", "device_name": "cuda"},
     # Registered backend: vendor/metax
     "metax": {"device_type": "cuda", "device_name": "metax"},
+    # Registered backend: vendor/musa
+    "mthreads": {"device_type": "musa", "device_name": "musa"},
 }
 
 
@@ -202,7 +204,7 @@ _load_op_config_from_env()
 class DeviceInfo:
     def __init__(self):
         self.device = DeviceDetector()
-        self.supported_device = ["nvidia", "ascend", "metax"]
+        self.supported_device = ["nvidia", "ascend", "metax", "mthreads"]
         backend.set_torch_backend_device_fn(self.device.vendor_name)
 
     @property
