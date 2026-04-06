@@ -47,7 +47,8 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
-from tests.utils.cleanup import device_cleanup
+from tests.utils.cleanup import device_cleanup, wait_for_memory
+from tests.utils.model_config import ModelConfig
 from tests.utils.platform_config import PlatformConfig
 from tests.utils.report import TestReport, TestResult
 
@@ -350,6 +351,24 @@ class TestRunner:
                 case=tc.case,
                 message="dry-run",
             )
+
+        # Wait for sufficient device memory before e2e tests
+        if tc.task in ("inference", "serving") and tc.model and tc.case:
+            gpu_util = ModelConfig.load(tc.model, tc.case).engine.get(
+                "gpu_memory_utilization", 0.9
+            )
+            ok, info = wait_for_memory(self.config.platform, gpu_util)
+            if not ok:
+                print("[run] FAILED: timed out waiting for device memory")
+                return TestResult(
+                    name=tc.name,
+                    passed=False,
+                    duration=0.0,
+                    message=f"OOM: timed out waiting for device memory\n{info}",
+                    task=tc.task,
+                    model=tc.model,
+                    case=tc.case,
+                )
 
         # Merge extra env vars (e.g. FL_TEST_MODEL/FL_TEST_CASE for inference)
         env = None

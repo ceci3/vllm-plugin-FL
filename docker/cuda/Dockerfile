@@ -6,7 +6,7 @@ FROM nvcr.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS base
 
 ARG PYTHON_VERSION=3.12
 ARG UV_VERSION=0.7.12
-ARG VLLM_VERSION=0.13.0
+ARG VLLM_VERSION=0.18.0
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -47,7 +47,7 @@ FROM base AS dev
 
 ARG INDEX_URL
 ARG EXTRA_INDEX_URL
-ARG VLLM_VERSION=0.13.0
+ARG VLLM_VERSION=0.18.0
 
 # Install vLLM
 RUN uv pip install --system \
@@ -70,7 +70,7 @@ FROM base AS ci
 
 ARG INDEX_URL
 ARG EXTRA_INDEX_URL
-ARG VLLM_VERSION=0.13.0
+ARG VLLM_VERSION=0.18.0
 
 # Install vLLM
 RUN uv pip install --system \
@@ -92,18 +92,17 @@ RUN uv pip install --system \
         pre-commit \
         ninja \
         cmake
-
+ARG FLAGGEMS_VERSION=v5.0.0
 ARG FLAGCX_VERSION=v0.9.0
 
 # Install FlagGems
 RUN uv pip install --system scikit-build-core==0.11 pybind11 \
-    && git clone https://github.com/flagos-ai/FlagGems /workspace/FlagGems \
+    && git clone --branch ${FLAGGEMS_VERSION} --depth 1 https://github.com/flagos-ai/FlagGems /workspace/FlagGems \
     && uv pip install --system --no-build-isolation /workspace/FlagGems
 
 # Install FlagCX (NVIDIA)
-RUN git clone https://github.com/flagos-ai/FlagCX.git /workspace/FlagCX \
+RUN git clone --branch ${FLAGCX_VERSION} --depth 1  https://github.com/flagos-ai/FlagCX.git /workspace/FlagCX \
     && cd /workspace/FlagCX \
-    && git checkout ${FLAGCX_VERSION} \
     && git submodule update --init --recursive \
     && make USE_NVIDIA=1 \
     && cd plugin/torch \
@@ -125,7 +124,7 @@ FROM base AS release
 
 ARG INDEX_URL
 ARG EXTRA_INDEX_URL
-ARG VLLM_VERSION=0.13.0
+ARG VLLM_VERSION=0.18.0
 
 # Install vLLM
 RUN uv pip install --system \

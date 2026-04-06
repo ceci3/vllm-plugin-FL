@@ -4,7 +4,7 @@
 platform: ascend
 
 # Docker image for this hardware
-ci_image: harbor.baai.ac.cn/flagscale/vllm-plugin-fl:v0.1.0-ascend-ci
+ci_image: harbor.baai.ac.cn/flagscale/vllm-plugin-fl:v0.2.0-ascend-ci
 
 # Runner labels for this hardware
 runner_labels:

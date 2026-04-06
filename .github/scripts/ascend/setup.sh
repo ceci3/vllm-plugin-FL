@@ -3,5 +3,7 @@
 # Setup script for Ascend NPU CI environment.
 set -euo pipefail
 
+git config --global --add safe.directory "$(pwd)"
+
 pip install --upgrade pip "setuptools>=77.0.3"
 pip install --no-build-isolation -e ".[test]"

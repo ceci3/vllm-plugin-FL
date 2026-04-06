@@ -9,6 +9,8 @@ on:
     paths-ignore:
       - "**.md"
       - "docs/**"
+      - "examples/**"
+      - "docker/**"
       - "LICENSE"
       - ".github/ISSUE_TEMPLATE/**"
       - ".github/PULL_REQUEST_TEMPLATE.md"
@@ -17,6 +19,8 @@ on:
     paths-ignore:
       - "**.md"
       - "docs/**"
+      - "examples/**"
+      - "docker/**"
       - "LICENSE"
       - ".github/ISSUE_TEMPLATE/**"
       - ".github/PULL_REQUEST_TEMPLATE.md"
