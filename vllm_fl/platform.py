@@ -1,5 +1,5 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
-# Adapted from https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/platforms/cuda.py
+# Adapted from https://github.com/vllm-project/vllm/blob/v0.19.0/vllm/platforms/cuda.py
 # Below is the original copyright:
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -13,6 +13,7 @@ import torch
 # import custom ops, trigger op registration (CUDA only)
 try:
     import vllm._C  # noqa
+    import vllm._C_stable_libtorch  # noqa
 except (ImportError, OSError):
     pass  # NPU or other platforms may not have vllm._C
 

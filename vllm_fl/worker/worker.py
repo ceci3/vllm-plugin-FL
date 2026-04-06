@@ -1,5 +1,5 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
-# Adapted from https://github.com/vllm-project/vllm/blob/v0.18.1/vllm/v1/worker/gpu_model_runner.py
+# Adapted from https://github.com/vllm-project/vllm/blob/v0.19.0/vllm/v1/worker/gpu_worker.py
 # Below is the original copyright:
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -807,7 +807,8 @@ class WorkerFL(WorkerBase):
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1, uniform_decode=True)
+        num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
+        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

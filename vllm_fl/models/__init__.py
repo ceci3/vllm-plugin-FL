@@ -1,3 +1,1 @@
-from .bge_m3 import BgeM3EmbeddingModel
-
-__all__ = ["BgeM3EmbeddingModel"]
+# BgeM3EmbeddingModel is now upstream in vLLM v0.19.0.
