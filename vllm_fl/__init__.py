@@ -47,7 +47,7 @@ def register():
 def register_model():
     """Register FL-specific models not yet upstream."""
     # Models now upstream in vLLM v0.18.1 (no longer need plugin registration):
-    #   Qwen3NextForCausalLM, Qwen3_5MoeForConditionalGeneration,
+    #   BGE-M3, Qwen3NextForCausalLM, Qwen3_5MoeForConditionalGeneration,
     #   MiniCPMO, KimiK25ForConditionalGeneration, Qwen3_5MoeConfig
 
     # Register GLM-5 (GlmMoeDsa) — config not yet upstream
@@ -61,4 +61,3 @@ def register_model():
     except Exception as e:
         logger.error(f"Register GlmMoeDsa model error: {str(e)}")
 
-    # BGE-M3 is now upstream in vLLM v0.19.0 — no longer needs plugin registration.

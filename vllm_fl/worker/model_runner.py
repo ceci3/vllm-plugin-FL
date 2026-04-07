@@ -1091,7 +1091,7 @@ class ModelRunnerFL(
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
-        """Initialize attributes from torch.cuda.get_device_properties"""
+        """Initialize attributes from current_platform.torch_device_fn.get_device_properties"""
 
         self.num_sms = num_compute_units(self.device.index)
 
@@ -4167,7 +4167,7 @@ class ModelRunnerFL(
 
         return None
 
-    @torch.inference_mode
+    @managed_inference_mode()
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
@@ -4375,6 +4375,9 @@ class ModelRunnerFL(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
             )
+
+        # FL: Advance IO step after the full inference cycle
+        advance_io_step()
 
         if not self.use_async_scheduling:
             return output
@@ -4790,6 +4793,9 @@ class ModelRunnerFL(
             self.eplb_state = EplbState(self.parallel_config, self.device)
             eplb_models = 0
 
+        # FL: IO dumper init (skipped under Dynamo tracing)
+        init_io_dump_from_env(getattr(self.model_config, "enforce_eager", False))
+
         try:
             with DeviceMemoryProfiler() as m:
                 time_before_load = time.perf_counter()
@@ -4854,16 +4860,19 @@ class ModelRunnerFL(
                     self.model.set_aux_hidden_state_layers(aux_layers)
                 time_after_load = time.perf_counter()
             self.model_memory_usage = m.consumed_memory
-        except torch.cuda.OutOfMemoryError as e:
-            msg = (
-                "Failed to load model - not enough GPU memory. "
-                "Try lowering --gpu-memory-utilization to free memory for weights, "
-                "increasing --tensor-parallel-size, or using --quantization. "
-                "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
-                "for more tips."
-            )
-            combined_msg = f"{msg} (original error: {e})"
-            logger.error(combined_msg)
+        except Exception as e:
+            is_oom = 'out of memory' in str(e).lower()
+
+            if is_oom:
+                msg = (
+                    "Failed to load model - not enough device memory. "
+                    "Try lowering --gpu-memory-utilization to free memory for weights, "
+                    "increasing --tensor-parallel-size, or using --quantization. "
+                    "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+                    "for more tips."
+                )
+                combined_msg = f"{msg} (original error: {e})"
+                logger.error(combined_msg)
             raise e
         logger.info_once(
             "Model loading took %s GiB memory and %.6f seconds",
@@ -4873,6 +4882,8 @@ class ModelRunnerFL(
         )
         if not load_dummy_weights:
             prepare_communication_buffer_for_model(self.model)
+            # FL: register IO dumper module hooks
+            register_io_module_hooks(self.model)
             if (drafter := getattr(self, "drafter", None)) and (
                 drafter_model := getattr(drafter, "model", None)
             ):
