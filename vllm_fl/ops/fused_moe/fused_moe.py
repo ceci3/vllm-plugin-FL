@@ -172,13 +172,12 @@ def fused_experts_impl(
         )
 
         call_op(
-            "dispatch_fused_moe_kernel",
+            "invoke_fused_moe_triton_kernel",
             qcurr_hidden_states,
             w1,
             intermediate_cache1,
             a1q_scale,
             w1_scale,
-            w1_zp,
             curr_topk_weights,
             sorted_token_ids,
             expert_ids,
@@ -229,13 +228,12 @@ def fused_experts_impl(
         )
 
         call_op(
-            "dispatch_fused_moe_kernel",
+            "invoke_fused_moe_triton_kernel",
             qintermediate_cache2,
             w2,
             intermediate_cache3,
             a2q_scale,
             w2_scale,
-            w2_zp,
             curr_topk_weights,
             sorted_token_ids,
             expert_ids,

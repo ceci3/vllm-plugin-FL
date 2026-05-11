@@ -24,30 +24,20 @@ from vllm_fl.ops.fused_moe.router import (
     GroupedTopKRouterFL,
     FusedTopKBiasRouterFL,
 )
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+)
 
+from .fused_moe_utils import select_unquantized_moe_backend_oot
 
 class UnquantizedFusedMoEMethodFL(UnquantizedFusedMoEMethod):
     """OOT replacement for UnquantizedFusedMoEMethod that routes computation through flaggems."""
-
-    def forward_oot(
-        self,
-        layer: "FusedMoE",
-        x: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return fused_experts(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=layer.activation,
-            quant_config=self.moe_quant_config,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__(moe)
+        self.unquantized_backend = select_unquantized_moe_backend_oot(
+            moe_config=self.moe,
+            use_ep=self.moe.moe_parallel_config.use_ep,
+            use_dp=self.moe.moe_parallel_config.dp_size > 1,
         )
 
 
@@ -60,7 +50,7 @@ class FusedMoEFL(FusedMoE):
     - Registered as OOT replacement via op_registry_oot
     - When FusedMoE() is instantiated, FusedMoEFL is created instead
     - Router operations use call_op("topk_softmax"/"grouped_topk")
-    - Expert computation uses call_op("dispatch_fused_moe_kernel")
+    - Expert computation uses call_op("invoke_fused_moe_triton_kernel")
     """
 
     def __init__(self, *args, **kwargs):

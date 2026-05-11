@@ -1,5 +1,5 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
-# Adapted from https://github.com/vllm-project/vllm/blob/v0.19.0/vllm/platforms/cuda.py
+# Adapted from https://github.com/vllm-project/vllm/blob/v0.20.0/vllm/platforms/cuda.py
 # Below is the original copyright:
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -145,6 +145,11 @@ class PlatformFL(Platform):
                 import vllm_fl.dispatch.backends.vendor.metax.patches  # noqa: F401
             except Exception as e:
                 logger.warning(f"Failed to import maca patches: {e}")
+
+    @classmethod
+    def import_ir_kernels(cls) -> None:
+        """Import IR kernel modules. OOT platforms override to import their own."""
+        import vllm.kernels  # noqa: F401
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -433,3 +438,13 @@ class PlatformFL(Platform):
             return True
         except:
             return False
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        """Set RNG seed across all devices for the current platform."""
+        cls.torch_device_fn.manual_seed_all(seed)
+
+    @classmethod
+    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+        """Returns whether the GPU is an integrated (UMA) device."""
+        return False

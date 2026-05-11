@@ -223,14 +223,13 @@ class CudaBackend(Backend):
             topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
         )
 
-    def dispatch_fused_moe_kernel(
+    def invoke_fused_moe_triton_kernel(
         self,
         A,
         B,
         C,
         A_scale,
         B_scale,
-        B_zp,
         topk_weights,
         sorted_token_ids,
         expert_ids,
@@ -247,15 +246,14 @@ class CudaBackend(Backend):
         block_shape=None,
         B_bias=None,
     ):
-        from .impl.fused_moe import dispatch_fused_moe_kernel_cuda
+        from .impl.fused_moe import invoke_fused_moe_triton_kernel_cuda
 
-        dispatch_fused_moe_kernel_cuda(
+        invoke_fused_moe_triton_kernel_cuda(
             A,
             B,
             C,
             A_scale,
             B_scale,
-            B_zp,
             topk_weights,
             sorted_token_ids,
             expert_ids,

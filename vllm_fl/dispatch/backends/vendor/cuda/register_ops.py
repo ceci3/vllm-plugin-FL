@@ -108,12 +108,12 @@ def register_builtins(registry) -> None:
             vendor="cuda",
             priority=BackendPriority.VENDOR,
         ),
-        # dispatch fused moe kernel
+        # invoke fused moe triton kernel
         OpImpl(
-            op_name="dispatch_fused_moe_kernel",
+            op_name="invoke_fused_moe_triton_kernel",
             impl_id="vendor.cuda",
             kind=BackendImplKind.VENDOR,
-            fn=_bind_is_available(backend.dispatch_fused_moe_kernel, is_avail),
+            fn=_bind_is_available(backend.invoke_fused_moe_triton_kernel, is_avail),
             vendor="cuda",
             priority=BackendPriority.VENDOR,
         ),

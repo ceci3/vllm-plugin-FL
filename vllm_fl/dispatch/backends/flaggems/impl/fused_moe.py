@@ -73,13 +73,12 @@ def topk_softmax_flaggems(
     return topk_weights, topk_indices
 
 
-def dispatch_fused_moe_kernel_flaggems(
+def invoke_fused_moe_triton_kernel_flaggems(
     A,
     B,
     C,
     A_scale,
     B_scale,
-    B_zp,
     topk_weights,
     sorted_token_ids,
     expert_ids,
@@ -96,15 +95,14 @@ def dispatch_fused_moe_kernel_flaggems(
     block_shape=None,
     B_bias=None,
 ):
-    from flag_gems import dispatch_fused_moe_kernel
+    from flag_gems import invoke_fused_moe_triton_kernel
 
-    dispatch_fused_moe_kernel(
+    invoke_fused_moe_triton_kernel(
         A,
         B,
         C,
         A_scale,
         B_scale,
-        B_zp,
         topk_weights,
         sorted_token_ids,
         expert_ids,

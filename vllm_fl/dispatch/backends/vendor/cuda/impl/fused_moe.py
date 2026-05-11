@@ -96,13 +96,12 @@ def grouped_topk_cuda(
     )
 
 
-def dispatch_fused_moe_kernel_cuda(
+def invoke_fused_moe_triton_kernel_cuda(
     A,
     B,
     C,
     A_scale,
     B_scale,
-    B_zp,
     topk_weights,
     sorted_token_ids,
     expert_ids,
@@ -120,16 +119,15 @@ def dispatch_fused_moe_kernel_cuda(
     B_bias=None,
 ):
     from vllm.model_executor.layers.fused_moe.fused_moe import (
-        dispatch_fused_moe_kernel,
+        invoke_fused_moe_triton_kernel,
     )
 
-    dispatch_fused_moe_kernel(
+    invoke_fused_moe_triton_kernel(
         A,
         B,
         C,
         A_scale,
         B_scale,
-        B_zp,
         topk_weights,
         sorted_token_ids,
         expert_ids,
