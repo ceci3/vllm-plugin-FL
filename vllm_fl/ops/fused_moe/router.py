@@ -64,6 +64,8 @@ class FusedTopKRouterFL(FusedTopKRouter):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         topk_weights, topk_ids, _ = fused_topk(
             hidden_states=hidden_states,
@@ -164,6 +166,8 @@ class GroupedTopKRouterFL(GroupedTopKRouter):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self._valid_grouping(router_logits):
             if self.e_score_correction_bias is not None:
@@ -221,11 +225,15 @@ class FusedTopKBiasRouterFL(FusedTopKBiasRouter):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         topk_weights, topk_ids = fused_topk_bias(
             hidden_states=hidden_states,
             gating_output=router_logits,
-            e_score_correction_bias=self.e_score_correction_bias.data,
+            e_score_correction_bias=self.e_score_correction_bias.data
+            if self.e_score_correction_bias is not None
+            else None,
             topk=self.top_k,
             renormalize=self.renormalize,
             scoring_func=self.scoring_func,

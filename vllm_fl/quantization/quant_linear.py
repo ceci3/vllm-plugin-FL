@@ -4,6 +4,7 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_INT8_KERNELS,
     _POSSIBLE_FP8_KERNELS,
     _POSSIBLE_KERNELS,
+    _POSSIBLE_FP8_BLOCK_KERNELS,
 )
 from vllm.platforms import PlatformEnum, current_platform
 
@@ -51,4 +52,9 @@ def add_oot_quant_kernel() -> None:
     if PlatformEnum.OOT not in _POSSIBLE_FP8_KERNELS:
         _POSSIBLE_FP8_KERNELS[PlatformEnum.OOT] = list(
             _POSSIBLE_FP8_KERNELS.get(source, [])
+        )
+
+    if PlatformEnum.OOT not in _POSSIBLE_FP8_BLOCK_KERNELS:
+        _POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.OOT] = list(
+            _POSSIBLE_FP8_BLOCK_KERNELS.get(source, [])
         )

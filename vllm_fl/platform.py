@@ -408,6 +408,13 @@ class PlatformFL(Platform):
             return None        
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
+    
+    @classmethod
+    def support_deep_gemm(cls) -> bool:
+        """Currently, only Hopper and Blackwell GPUs are supported."""
+        if cls.device_type == "cuda" and cls.vendor_name == "nvidia":
+            return cls.is_device_capability(90) or cls.is_device_capability_family(100)
+        return False
 
     @classmethod
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:

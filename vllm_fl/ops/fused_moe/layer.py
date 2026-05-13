@@ -1,10 +1,16 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
-# Adapted from vllm/model_executor/layers/fused_moe/layer.py
+# Adapted from vllm/model_executor/layers/fused_moe/layer.py (v0.20.2)
 
 import torch
+import inspect
 
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    MoERunner,
+)
+from vllm.model_executor.layers.fused_moe.runner.moe_runner_interface import (
+    MoERunnerInterface,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -18,7 +24,6 @@ from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
     GroupedTopKRouter,
 )
 
-from vllm_fl.ops.fused_moe.fused_moe import fused_experts
 from vllm_fl.ops.fused_moe.router import (
     FusedTopKRouterFL,
     GroupedTopKRouterFL,
@@ -34,7 +39,7 @@ class UnquantizedFusedMoEMethodFL(UnquantizedFusedMoEMethod):
     """OOT replacement for UnquantizedFusedMoEMethod that routes computation through flaggems."""
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.unquantized_backend = select_unquantized_moe_backend_oot(
+        self.unquantized_backend, self.experts_cls = select_unquantized_moe_backend_oot(
             moe_config=self.moe,
             use_ep=self.moe.moe_parallel_config.use_ep,
             use_dp=self.moe.moe_parallel_config.dp_size > 1,
@@ -55,6 +60,12 @@ class FusedMoEFL(FusedMoE):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        sig = inspect.signature(FusedMoE.__init__)
+        bound = sig.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        for name, value in bound.arguments.items():
+            if name != "self":
+                setattr(self, f"_{name}", value)
         # Replace router with FL version that uses call_op for flaggems dispatch
         self._replace_router_with_fl()
 
@@ -63,7 +74,6 @@ class FusedMoEFL(FusedMoE):
         router = self.router
 
         if isinstance(router, GroupedTopKRouter):
-            # Create FL router with same parameters
             self.router = GroupedTopKRouterFL(
                 top_k=router.top_k,
                 global_num_experts=router.global_num_experts,
@@ -102,17 +112,23 @@ class FusedMoEFL(FusedMoE):
             )
 
         # Re-initialize runner with the new FL router
-        self.runner = self._init_runner()
+        self.runner: MoERunnerInterface = MoERunner(
+            layer_name=self.layer_name,
+            moe_config=self.moe_config,
+            router=self.router,
+            gate=self._gate,
+            shared_experts=self._shared_experts,
+            quant_method=self.quant_method,
+            enable_dbo=self.vllm_config.parallel_config.enable_dbo,
+            routed_input_transform=self._routed_input_transform,
+            routed_output_transform=self._routed_output_transform,
+            # When apply_routed_scale_to_output is True, we allow
+            # the scaling factor to be passed to the runner, otherwise
+            # we pass 1.0 so it ends up being a nop.
+            routed_scaling_factor=self._routed_scaling_factor
+            if self._apply_routed_scale_to_output
+            else 1.0,
+        )
 
 
-class SharedFusedMoEFL(SharedFusedMoE, FusedMoEFL):
-    """OOT replacement for SharedFusedMoE.
-
-    PluggableLayer.__new__ matches by cls.__name__, so SharedFusedMoE
-    needs its own registration entry.  The FL router/expert replacement
-    logic is inherited from FusedMoEFL via MRO.
-    """
-    pass
-
-
-__all__ = ["FusedMoEFL", "SharedFusedMoEFL", "UnquantizedFusedMoEMethodFL"]
+__all__ = ["FusedMoEFL", "UnquantizedFusedMoEMethodFL"]
