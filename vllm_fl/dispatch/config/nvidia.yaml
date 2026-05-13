@@ -45,10 +45,11 @@ op_backends:
 
 # FlagOS operator blacklist
 flagos_blacklist:
-  - copy
   - copy_
   - to_copy
-
+  - cat
+  - index
+  - mul
 
 # OOT (Out-of-Tree) operator blacklist
 # oot_blacklist: []

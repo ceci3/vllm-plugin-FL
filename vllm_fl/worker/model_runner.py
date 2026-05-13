@@ -1099,6 +1099,13 @@ class ModelRunnerFL(
     def _sync_device(self) -> None:
         torch.accelerator.synchronize()
 
+    def _get_or_create_async_output_copy_stream(self) -> current_platform.torch_device_fn.Stream:
+        stream = self.async_output_copy_stream
+        if stream is None:
+            stream = current_platform.torch_device_fn.Stream()
+            self.async_output_copy_stream = stream
+        return stream
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         """Update the cached states and the persistent batch with the scheduler
         output.
