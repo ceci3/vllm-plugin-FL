@@ -1,5 +1,6 @@
 
 from enum import Enum
+from typing import Any
 
 import torch
 
@@ -15,10 +16,11 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import UnquantizedMoeBackend, map_unquantized_backend
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts, invoke_fused_moe_triton_kernel, try_get_optimal_moe_config, _prepare_expert_assignment
+from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts, try_get_optimal_moe_config
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache, moe_kernel_quantize_input
 from vllm.triton_utils import tl, triton
 from vllm_fl.dispatch import call_op
+from vllm_fl.ops.fused_moe.activation import apply_moe_activation
 
 logger = init_logger(__name__)
 
@@ -90,6 +92,53 @@ def select_unquantized_moe_backend_oot(moe_config: FusedMoEConfig, use_ep: bool,
     logger.info_once(_make_log_backend(backend))
     return backend, TritonExpertsFL
 
+def _prepare_expert_assignment(
+    topk_ids: torch.Tensor,
+    config: dict[str, Any],
+    num_tokens: int,
+    top_k_num: int,
+    global_num_experts: int,
+    expert_map: torch.Tensor | None,
+    *,
+    use_int8_w8a16: bool = False,
+    use_int4_w4a16: bool = False,
+    block_shape: list[int] | None = None,
+    ignore_invalid_experts: bool = False,
+) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
+    """Prepare expert assignments for the aligned and low-latency Triton paths."""
+    # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
+    # activates only a small fraction of total experts
+    # Skips moe_align_block_size and activates the `sorted_token_ids is None`
+    # path of the fused_moe_kernel kernel
+    naive_block_assignment = (
+        expert_map is None
+        and num_tokens * top_k_num * 4 <= global_num_experts
+        and not (
+            (use_int8_w8a16 or use_int4_w4a16)
+            and block_shape is not None
+            and block_shape[1] > 0
+        )
+    )
+
+    if naive_block_assignment:
+        return (
+            None,
+            topk_ids.view(-1),
+            torch.full(
+                (1,),
+                topk_ids.numel() * config["BLOCK_SIZE_M"],
+                dtype=torch.int32,
+                device=topk_ids.device,
+            ),
+        )
+
+    return call_op("moe_align_block_size",
+        topk_ids,
+        config["BLOCK_SIZE_M"],
+        global_num_experts,
+        expert_map,
+        ignore_invalid_experts=ignore_invalid_experts,
+    )
 
 class TritonExpertsFL(TritonExperts):
     def apply(
@@ -182,7 +231,7 @@ class TritonExpertsFL(TritonExperts):
             )
         )
 
-        invoke_fused_moe_triton_kernel(
+        call_op("invoke_fused_moe_triton_kernel",
             hidden_states,
             w1,
             intermediate_cache1,
@@ -205,7 +254,8 @@ class TritonExpertsFL(TritonExperts):
             B_bias=self.w1_bias,
         )
 
-        self.activation(
+        # self.activation(
+        apply_moe_activation(
             activation, intermediate_cache2, intermediate_cache1.view(-1, N)
         )
 
@@ -220,7 +270,7 @@ class TritonExpertsFL(TritonExperts):
             quantization_emulation=self.quantization_emulation,
         )
 
-        invoke_fused_moe_triton_kernel(
+        call_op("invoke_fused_moe_triton_kernel",
             qintermediate_cache2,
             w2,
             intermediate_cache3,
