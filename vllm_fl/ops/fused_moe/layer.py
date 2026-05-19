@@ -40,9 +40,7 @@ class UnquantizedFusedMoEMethodFL(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.unquantized_backend, self.experts_cls = select_unquantized_moe_backend_oot(
-            moe_config=self.moe,
-            use_ep=self.moe.moe_parallel_config.use_ep,
-            use_dp=self.moe.moe_parallel_config.dp_size > 1,
+            moe_config=self.moe
         )
 
 
@@ -59,13 +57,19 @@ class FusedMoEFL(FusedMoE):
     """
 
     def __init__(self, *args, **kwargs):
+        routed_scaling_factor = kwargs.pop("routed_scaling_factor", 1.0)
+        shared_experts = kwargs.pop("shared_experts", None)
+        gate = kwargs.pop("gate", None)
+        routed_input_transform = kwargs.pop("routed_input_transform", None)
+        routed_output_transform = kwargs.pop("routed_output_transform", None)
+        apply_routed_scale_to_output = kwargs.pop("apply_routed_scale_to_output", False)
         super().__init__(*args, **kwargs)
-        sig = inspect.signature(FusedMoE.__init__)
-        bound = sig.bind(self, *args, **kwargs)
-        bound.apply_defaults()
-        for name, value in bound.arguments.items():
-            if name != "self":
-                setattr(self, f"_{name}", value)
+        self._routed_scaling_factor = routed_scaling_factor
+        self._shared_experts = shared_experts
+        self._gate = gate
+        self._routed_input_transform = routed_input_transform
+        self._routed_output_transform = routed_output_transform
+        self._apply_routed_scale_to_output = apply_routed_scale_to_output
         # Replace router with FL version that uses call_op for flaggems dispatch
         self._replace_router_with_fl()
 

@@ -22,7 +22,6 @@ def apply_moe_activation(
             f"{output.size(-1)} vs {input.size(-1)}"
         )
 
-    print(f"Applying MoE activation {activation=}")
     # Activations with gated multiplication (gate × activation(up))
     if activation == MoEActivation.SILU:
         output.copy_(call_op("silu_and_mul", None, input))

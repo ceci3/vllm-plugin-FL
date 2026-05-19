@@ -50,6 +50,7 @@ flagos_blacklist:
   - cat
   - index
   - mul
+  - pow_scalar
 
 # OOT (Out-of-Tree) operator blacklist
 # oot_blacklist: []

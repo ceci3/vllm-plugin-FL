@@ -5062,7 +5062,7 @@ class ModelRunnerFL(
             )
 
         # begin loading weights
-        logger.info_once("Reloading weights inplace...", )
+        logger.info_once("Reloading weights inplace...")
         if is_checkpoint_format:
             # load weights from checkpoint/ original model format
             initialize_layerwise_reload(model)

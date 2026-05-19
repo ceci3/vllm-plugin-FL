@@ -48,7 +48,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.utils.torch_utils import is_quantized_kv_cache, set_random_seed
+from vllm.utils.torch_utils import set_random_seed
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import TorchProfilerWrapper

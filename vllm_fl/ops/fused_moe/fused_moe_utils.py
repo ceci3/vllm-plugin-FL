@@ -14,83 +14,206 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.model_executor.layers.fused_moe.oracle.unquantized import UnquantizedMoeBackend, map_unquantized_backend
+from vllm.model_executor.layers.fused_moe.oracle.unquantized import UnquantizedMoeBackend, map_unquantized_backend, backend_to_kernel_cls
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts, try_get_optimal_moe_config
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache, moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    FlashinferMoeBackend, 
+    get_flashinfer_moe_backend,
+)
 from vllm.triton_utils import tl, triton
 from vllm_fl.dispatch import call_op
 from vllm_fl.ops.fused_moe.activation import apply_moe_activation
+from vllm_fl.utils import use_flaggems
 
 logger = init_logger(__name__)
 
-## Adopt from select_unquantized_moe_backend
-def select_unquantized_moe_backend_oot(moe_config: FusedMoEConfig, use_ep: bool, use_dp: bool):
+def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBackend]:
     """
-    Select the primary Unquantized MoE backend and experts class.
-    Returns: (backend, experts_cls)
+    Get available backends in priority order based on platform and config.
+
+    This function can be extended to become more complex as needed.
+    """
+
+    def _move_to_back(
+        backends: list[UnquantizedMoeBackend],
+        backend: UnquantizedMoeBackend,
+    ) -> None:
+        backends.append(backends.pop(backends.index(backend)))
+
+    if current_platform.is_rocm():
+        _AVAILABLE_BACKENDS = [
+            UnquantizedMoeBackend.AITER,
+            UnquantizedMoeBackend.TRITON,
+            UnquantizedMoeBackend.BATCHED_TRITON,
+        ]
+    elif current_platform.is_cuda():
+        _AVAILABLE_BACKENDS = [
+            UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+            UnquantizedMoeBackend.FLASHINFER_CUTLASS,
+            UnquantizedMoeBackend.TRITON,
+            UnquantizedMoeBackend.BATCHED_TRITON,
+        ]
+
+        # HACK: Qwen3.5 has crash with FLASHINFER_CUTLASS BF16 if DEP.
+        # Updating the oracle querying logic is out of the scope of this
+        # PR. Need to fix the kernel or update structure in follow up.
+        if moe_config.moe_parallel_config.dp_size > 1:
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
+
+    elif current_platform.is_xpu():
+        _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.XPU]
+    elif current_platform.is_cpu():
+        _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.CPU]
+    return _AVAILABLE_BACKENDS
+
+## Adopt from select_unquantized_moe_backend
+def select_unquantized_moe_backend_oot(moe_config: FusedMoEConfig,
+) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
+    """
+    Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
 
-    def _make_log_backend(backend: UnquantizedMoeBackend):
-        return f"Using {backend.value} backend for Unquantized MoE"
+    if current_platform.is_cpu():
+        # TODO: migrate to MK structure.
+        return UnquantizedMoeBackend.CPU, None
 
-    activation_format = (
+    if current_platform.is_tpu():
+        return UnquantizedMoeBackend.TPU, None
+    
+    if current_platform.is_out_of_tree() and use_flaggems():
+        return UnquantizedMoeBackend.TRITON, TritonExpertsFL
+
+    if moe_config.is_lora_enabled:
+        return UnquantizedMoeBackend.TRITON, backend_to_kernel_cls(
+            UnquantizedMoeBackend.TRITON
+        )
+
+    # NOTE: the kernels are selected in the following order.
+    AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
+
+    # NOTE(rob): We need to peak into the P/F selection to determine
+    # if we are using the batched or standard expert format, which
+    # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
+    activation_format = ( 
         mk.FusedMoEActivationFormat.BatchedExperts
         if moe_config.moe_parallel_config.use_batched_activation_format
         else mk.FusedMoEActivationFormat.Standard
     )
 
-    # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
-    flashinfer_cutlass_available = (
-        has_flashinfer_cutlass_fused_moe()
-        and use_ep
-        and (not use_dp)
-        and current_platform.has_device_capability(90)
-    )
-    flashinfer_cutlass_moe_enabled = (
-        flashinfer_cutlass_available and envs.VLLM_USE_FLASHINFER_MOE_FP16
-    )
-    rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
+    def _make_log_backend(backend: UnquantizedMoeBackend) -> str:
+        available_strs = [b.value for b in AVAILABLE_BACKENDS]
+        return (
+            f"Using {backend.value} Unquantized MoE backend out "
+            f"of potential backends: {available_strs}."
+        )
 
-    # Handle explicit moe_backend from user.
+    def _make_log_unsupported(
+        backend: UnquantizedMoeBackend, reason: str | None
+    ) -> str:
+        if reason:
+            return (
+                f"Unquantized MoE backend {backend.value} does not support the "
+                f"deployment configuration since {reason}."
+            )
+        return (
+            f"Unquantized MoE backend '{backend.value}' does not support the "
+            "deployment configuration."
+        )
+
+    def _return_or_raise(
+        backend: UnquantizedMoeBackend,
+        config: FusedMoEConfig,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
+        k_cls = backend_to_kernel_cls(backend)
+        supported, reason = k_cls.is_supported_config(
+            k_cls, config, None, None, activation_format
+        )
+        if supported:
+            logger.info_once(_make_log_backend(backend))
+            return backend, k_cls
+        raise ValueError(_make_log_unsupported(backend, reason))
+
     runner_backend = moe_config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_unquantized_backend(runner_backend)
-        if requested_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-            if not flashinfer_cutlass_available:
-                raise ValueError(
-                    "FlashInfer CUTLASS MoE backend is not available for this "
-                    "configuration."
-                )
-        elif requested_backend == UnquantizedMoeBackend.AITER and not (
-            current_platform.is_rocm() and rocm_aiter_moe_enabled
+        if (
+            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+            and requested_backend == UnquantizedMoeBackend.TRITON
         ):
-            raise ValueError(
-                "ROCm AITer MoE backend is not available for this configuration."
+            requested_backend = UnquantizedMoeBackend.BATCHED_TRITON
+
+        return _return_or_raise(requested_backend, moe_config, activation_format)
+
+    # Handle explicit FlashInfer FP16 configuration.
+    if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP16"):
+        if not envs.VLLM_USE_FLASHINFER_MOE_FP16:
+            if UnquantizedMoeBackend.FLASHINFER_TRTLLM in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.FLASHINFER_TRTLLM)
+            if UnquantizedMoeBackend.FLASHINFER_CUTLASS in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.FLASHINFER_CUTLASS)
+
+        elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
+            # If user is explicit about backend, validate it.
+            fi_backend = get_flashinfer_moe_backend()
+            if fi_backend == FlashinferMoeBackend.CUTLASS:
+                backend = UnquantizedMoeBackend.FLASHINFER_CUTLASS
+            elif fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
+                backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
+            else:
+                raise ValueError(
+                    f"FlashInfer MOE backend {fi_backend} "
+                    "does not support unquantized MoE."
+                )
+            k_cls = backend_to_kernel_cls(backend) 
+            return _return_or_raise(backend, moe_config, activation_format)
+        else:
+            # If the user is not explicit about the backend, try both.
+            for backend in [
+                UnquantizedMoeBackend.FLASHINFER_TRTLLM,
+                UnquantizedMoeBackend.FLASHINFER_CUTLASS,
+            ]:
+                k_cls = backend_to_kernel_cls(backend)
+                supported, reason = k_cls.is_supported_config(
+                    k_cls, moe_config, None, None, activation_format
+                )
+                if supported:
+                    logger.info_once(_make_log_backend(backend))
+                    return backend, k_cls
+                else:
+                    logger.debug_once(_make_log_unsupported(backend, reason))
+
+            raise NotImplementedError(
+                "Found VLLM_USE_FLASHINFER_MOE_FP16=1, but no "
+                "FlashInfer unquantized MoE backend supports the configuration."
             )
-        logger.info_once(_make_log_backend(requested_backend))
-        return requested_backend, TritonExpertsFL
 
-    if current_platform.is_rocm():
-        if rocm_aiter_moe_enabled:
+    # Handle explicit AITER FP8 configuration.
+    if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
+        if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
+            if UnquantizedMoeBackend.AITER in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
+        else:
             backend = UnquantizedMoeBackend.AITER
-        else:
-            backend = UnquantizedMoeBackend.TRITON
-    if current_platform.is_cuda() or current_platform.is_cuda_alike():
-        if flashinfer_cutlass_moe_enabled:
-            backend = UnquantizedMoeBackend.FLASHINFER_CUTLASS
-        else:
-            backend = UnquantizedMoeBackend.TRITON
-    if current_platform.is_xpu():
-        backend = UnquantizedMoeBackend.XPU
-    if current_platform.is_cpu():
-        backend = UnquantizedMoeBackend.CPU
-    if current_platform.is_tpu():
-        backend = UnquantizedMoeBackend.TPU
+            return _return_or_raise(backend, moe_config, activation_format)
 
-    logger.info_once(_make_log_backend(backend))
-    return backend, TritonExpertsFL
+    for backend in AVAILABLE_BACKENDS:
+        k_cls = backend_to_kernel_cls(backend)
+        supported, reason = k_cls.is_supported_config(
+            k_cls, moe_config, None, None, activation_format
+        )
+        if supported:
+            logger.info_once(_make_log_backend(backend))
+            return backend, k_cls
+
+        logger.debug_once(_make_log_unsupported(backend, reason))
+
+    raise NotImplementedError(
+        "No Unquantized MoE backend supports the deployment configuration."
+    )
 
 def _prepare_expert_assignment(
     topk_ids: torch.Tensor,
