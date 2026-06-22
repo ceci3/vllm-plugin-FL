@@ -1,7 +1,7 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
 
 import torch
-from vllm.model_executor.layers.activation import SiluAndMul, GeluAndMul
+from vllm.model_executor.layers.activation import SiluAndMul, GeluAndMul, SiluAndMulWithClamp
 from vllm_fl.dispatch import call_op
 
 
@@ -21,4 +21,12 @@ class GeluAndMulFL(GeluAndMul):
         return call_op("gelu_and_mul", self, x)
 
 
-__all__ = ["SiluAndMulFL", "GeluAndMulFL"]
+class SiluAndMulWithClampFL(SiluAndMulWithClamp):
+    def __init__(self, swiglu_limit: float):
+        super().__init__(swiglu_limit)
+
+    def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
+        return call_op("silu_and_mul_with_clamp", x, self.swiglu_limit)
+
+
+__all__ = ["SiluAndMulFL", "GeluAndMulFL", "SiluAndMulWithClampFL"]

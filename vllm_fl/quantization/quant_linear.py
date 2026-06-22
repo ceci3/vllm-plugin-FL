@@ -7,6 +7,7 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_FP8_BLOCK_KERNELS,
 )
 from vllm.platforms import PlatformEnum, current_platform
+from .fp8 import FlagGemsFp8BlockScaledMMLinearKernel
 
 
 def _resolve_source_platform() -> PlatformEnum:
@@ -58,3 +59,4 @@ def add_oot_quant_kernel() -> None:
         _POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.OOT] = list(
             _POSSIBLE_FP8_BLOCK_KERNELS.get(source, [])
         )
+        _POSSIBLE_FP8_BLOCK_KERNELS[PlatformEnum.OOT].insert(0, FlagGemsFp8BlockScaledMMLinearKernel)

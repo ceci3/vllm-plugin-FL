@@ -3842,6 +3842,7 @@ class ModelRunnerFL(
                 "State error: sample_tokens() must be called "
                 "after execute_model() returns None."
             )
+        # print(f"{scheduler_output=}")
 
         if self.routed_experts_initialized:
             capturer = RoutedExpertsCapturer.get_instance()
@@ -4834,6 +4835,7 @@ class ModelRunnerFL(
                 if load_dummy_weights:
                     self.load_config.load_format = "dummy"
                 model_loader = get_model_loader(self.load_config)
+                # print(f"{model_loader=}")
                 self.model = model_loader.load_model(
                     vllm_config=self.vllm_config, model_config=self.model_config
                 )
@@ -6340,6 +6342,7 @@ class ModelRunnerFL(
 
         attention_backend_maps = []
         attention_backend_list = []
+        # print(f"Initializing attention backends for KV cache groups: {kv_cache_config.kv_cache_groups}")
         for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
             attn_backends = get_attn_backends_for_group(kv_cache_group_spec)
             attention_backend_maps.append(attn_backends[0])
@@ -6626,6 +6629,7 @@ class ModelRunnerFL(
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
+            # print(f"Processing KV cache group {group.kv_cache_group_id} with spec {kv_cache_spec} and backend {attn_backend.__name__}")
             if group.kv_cache_group_id == len(kernel_block_sizes):
                 # There may be a last group for layers without kv cache.
                 continue
@@ -6677,6 +6681,7 @@ class ModelRunnerFL(
                     ]
 
                     raw_tensor = kv_cache_raw_tensors[layer_name].view(dtype)
+                    # print(f"Reshaping KV cache {raw_tensor.shape=} for layer {layer_name} to shape {kv_cache_shape} with dtype {dtype}")
                     if kv_cache_spec.page_size_padded is not None:
                         # Use strided view to handle page_size_bytes that
                         # include padding. This follows
@@ -6884,6 +6889,7 @@ class ModelRunnerFL(
 
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
+        # print(f"Initialized InputBatch with kv_cache_config={kv_cache_config} and kernel_block_sizes={kernel_block_sizes}")
         kv_caches = self.initialize_kv_cache_tensors(
             kv_cache_config, kernel_block_sizes
         )
@@ -6999,6 +7005,7 @@ class ModelRunnerFL(
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         layer_type = cast(type[Any], AttentionLayerBase)
         attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type)
+        # print(f"Parsing KV cache spec for attention layers: {layer_type=}, {attn_layers=}")
         for layer_name, attn_module in attn_layers.items():
             if isinstance(attn_module, Attention) and (
                 kv_tgt_layer := attn_module.kv_sharing_target_layer_name

@@ -72,6 +72,8 @@ def register_router():
 
 def register_model():
     """Register FL-specific models not yet upstream."""
+    from vllm import ModelRegistry
+
     _register_flagcx_connector()
 
     # Register OOT quant kernels so kernel selection can find them
@@ -88,3 +90,13 @@ def register_model():
         #glm5_model()
     except Exception as e:
         logger.error(f"Register GlmMoeDsa model error: {str(e)}")
+
+    # Register DeepseekV4 model
+    try:
+        ModelRegistry.register_model(
+            "DeepseekV4ForCausalLM",
+            "vllm_fl.models.deepseek_v4:DeepseekV4ForCausalLM"
+        )
+    except Exception as e:
+        logger.error(f"Register DeepseekV4 model error: {str(e)}")
+    
