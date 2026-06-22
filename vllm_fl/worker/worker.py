@@ -51,7 +51,7 @@ from vllm.lora.request import LoRARequest
 from vllm.utils.torch_utils import set_random_seed
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.platforms import current_platform
-from vllm.profiler.wrapper import TorchProfilerWrapper
+from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -211,20 +211,16 @@ class WorkerFL(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
-        # Torch profiler. Enabled and configured through env vars:
-        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        # Torch/CUDA profiler. Enabled and configured through profiler_config.
+        # Profiler wrapper is created lazily in profile() when start is called,
+        # so we have all the information needed for proper trace naming.
         self.profiler: Any | None = None
         profiler_config = vllm_config.profiler_config
-        if profiler_config.profiler == "torch":
-            worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
-            self.profiler = TorchProfilerWrapper(
-                profiler_config,
-                worker_name=worker_name,
-                local_rank=self.local_rank,
-                activities=["CPU", "CUDA"],
-            )
-        else:
-            self.profiler = None
+        self.profiler_config = profiler_config
+
+        # Only validate profiler config is valid, don't instantiate yet
+        if self.profiler_config.profiler not in ("torch", "cuda", None):
+            raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
 
         logger.debug("=== ENVIRONMENT VARIABLES ===")
         for k, v in sorted(os.environ.items()):
@@ -238,12 +234,16 @@ class WorkerFL(WorkerBase):
             # Get whitelist and blacklist from environment variables
             whitelist, blacklist = get_flag_gems_whitelist_blacklist()
 
+            # Only rank 0 records the oplist to avoid file truncation and
+            # interleaved writes when tensor-parallel-size > 1.
+            should_record = (rank == 0)
+
             # Use whitelist if specified (takes precedence over blacklist)
             if whitelist:
                 logger.info(f"[FlagGems] Enable only the following ops: {whitelist}")
                 flag_gems.only_enable(
                     include=whitelist,
-                    record=True,
+                    record=should_record,
                     once=True,
                     path=fl_envs.FLAGGEMS_ENABLE_OPLIST_PATH,
                 )
@@ -251,14 +251,14 @@ class WorkerFL(WorkerBase):
                 logger.info(f"[FlagGems] Disable the following ops: {blacklist}")
                 flag_gems.enable(
                     unused=blacklist,
-                    record=True,
+                    record=should_record,
                     once=True,
                     path=fl_envs.FLAGGEMS_ENABLE_OPLIST_PATH,
                 )
             else:
                 logger.info("[FlagGems] Enable all ops")
                 flag_gems.enable(
-                    record=True, once=True, path=fl_envs.FLAGGEMS_ENABLE_OPLIST_PATH
+                    record=should_record, once=True, path=fl_envs.FLAGGEMS_ENABLE_OPLIST_PATH
                 )
 
     # def sleep(self, level: int = 1) -> None:
@@ -806,11 +806,47 @@ class WorkerFL(WorkerBase):
         return self.model_runner.take_draft_token_ids()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        if self.profiler is None:
-            raise RuntimeError("Profiling is not enabled.")
+        if self.profiler_config is None or self.profiler_config.profiler is None:
+            raise RuntimeError(
+                "Profiling is not enabled. Please set --profiler-config to enable "
+                "profiling. Example: "
+                "'--profiler-config.profiler=torch --profiler-config.torch_profiler_dir"
+                "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
+            )
+
         if is_start:
+            from vllm.distributed.utils import get_worker_rank_suffix
+
+            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
+            trace_name = (
+                f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
+            )
+
+            if self.profiler is None:
+                profiler_type = self.profiler_config.profiler
+                if profiler_type == "torch":
+                    self.profiler = TorchProfilerWrapper(
+                        self.profiler_config,
+                        worker_name=trace_name,
+                        local_rank=self.local_rank,
+                        activities=["CPU", "CUDA"],
+                    )
+                    logger.debug(
+                        "Starting torch profiler with trace name: %s", trace_name
+                    )
+                elif profiler_type == "cuda":
+                    self.profiler = CudaProfilerWrapper(self.profiler_config)
+                    logger.debug("Starting CUDA profiler")
+                else:
+                    raise ValueError(
+                        f"Invalid profiler value of {self.profiler_config.profiler}"
+                    )
+
             self.profiler.start()
         else:
+            if self.profiler is None:
+                logger.warning("Profiler was not started, nothing to stop.")
+                return
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
