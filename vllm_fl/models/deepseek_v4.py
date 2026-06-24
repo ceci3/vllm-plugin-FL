@@ -44,7 +44,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
@@ -57,13 +57,57 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+
 from vllm_fl.ops.deepseek_v4_attention import (
     DeepseekV4Indexer,
     DeepseekV4MLAModules,
     DeepseekV4MultiHeadLatentAttentionFLWrapper,
 )
+ 
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
+
+class WOAColumnParallelLinear(ColumnParallelLinear):
+    def __init__(self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        gather_output: bool = False,
+        skip_bias_add: bool = False,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+        disable_tp: bool = False,
+    ):
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            bias=bias,
+            gather_output=gather_output,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            quant_config=quant_config,
+            prefix=prefix,
+            return_bias=return_bias,
+            disable_tp=disable_tp,
+        )
+        # Replace the quant_method's process_weights_after_loading on this
+        # instance so that utils.py's generic call triggers BMM reshape.
+        orig_fn = self.quant_method.process_weights_after_loading
+
+        def _process_weights_after_loading(layer):
+            orig_fn(layer)
+            if getattr(layer, "is_bmm", False):
+                w = layer.weight
+                if w.ndim == 2:
+                    g = layer.bmm_batch_size
+                    d = w.size(1)
+                    r = w.size(0) // g
+                    replace_parameter(layer, "weight", w.view(g, r, d))
+
+        self.quant_method.process_weights_after_loading = _process_weights_after_loading
 
 
 class DeepseekV4MLP(nn.Module):
@@ -986,14 +1030,24 @@ class DeepseekV4Attention(nn.Module):
         )
 
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
-        self.wo_a = ColumnParallelLinear(
-            self.n_heads * self.head_dim // self.n_groups,
-            self.n_groups * self.o_lora_rank,
-            bias=False,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix=f"{prefix}.wo_a",
-        )
+        if quant_config is None:
+            self.wo_a = WOAColumnParallelLinear(
+                self.n_heads * self.head_dim // self.n_groups,
+                self.n_groups * self.o_lora_rank,
+                bias=False,
+                quant_config=quant_config,
+                return_bias=False,
+                prefix=f"{prefix}.wo_a",
+            )
+        else:
+            self.wo_a = ColumnParallelLinear(
+                self.n_heads * self.head_dim // self.n_groups,
+                self.n_groups * self.o_lora_rank,
+                bias=False,
+                quant_config=quant_config,
+                return_bias=False,
+                prefix=f"{prefix}.wo_a",
+            )
         self.wo_a.is_bmm = True
         self.wo_a.bmm_batch_size = self.n_local_groups
         self.wo_b = RowParallelLinear(

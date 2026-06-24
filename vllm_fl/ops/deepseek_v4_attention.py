@@ -294,24 +294,6 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(PluggableLayer):
                 prefix=f"{prefix}.compressor",
                 k_cache_prefix=self.mla_attn.prefix,
             )
-        self.process_weights_after_loading()
-
-    def process_weights_after_loading(self) -> None:
-        if self._wo_a_needs_reshape:
-            wo_a_tmp = self._post_process_weight(
-                self.wo_a.weight, self.wo_a.is_bmm,
-                self.wo_a.bmm_batch_size)
-            replace_parameter(self.wo_a, "weight", wo_a_tmp)
-
-    def _post_process_weight(self, w: nn.Parameter, is_bmm: bool, bmm_batch_size: int | None) -> None:
-        if is_bmm:
-            g = bmm_batch_size
-            assert w.ndim == 2 and w.ndim == 2
-            d = w.size(1)
-            r = w.size(0) // g
-            w = w.view(g, r, d)
-        return w
-
 
     def forward(
         self,
