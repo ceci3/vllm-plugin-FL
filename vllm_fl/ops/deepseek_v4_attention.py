@@ -26,11 +26,8 @@ from vllm.v1.attention.ops.deepseek_v4_ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
-    gather_k_cache,
     fused_indexer_q_rope_quant,
-    fused_indexer_q_rope,
     fused_inv_rope_fp8_quant,
-    fused_inv_rope,
     fused_q_kv_rmsnorm,
 )
 
@@ -82,6 +79,7 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from .deepseek_compressor import DeepseekCompressor
 from .sparse_attn_indexer_bf16 import SparseAttnIndexerBF16
+from vllm_fl.dispatch import call_op
 
 logger = init_logger(__name__)
 
@@ -320,7 +318,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(PluggableLayer):
         o = o_padded[:, : self.n_local_heads, :]
 
         # O projection: inverse RoPE + einsum + wo_b
-        o_bf16 = fused_inv_rope(
+        o_bf16 = call_op("fused_inv_rope",
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
@@ -518,6 +516,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(PluggableLayer):
         assert swa_metadata is not None
 
         swa_kv_cache = self.swa_cache_layer.kv_cache
+        ### NOTE(lms): fp8 need view
         # swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
         # print(f"swa_kv_cache_2d: {swa_kv_cache}, shape: {swa_kv_cache.shape}")
 
@@ -719,7 +718,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
-            dtype=torch.bfloat16 if self.kv_cache_dtype is "bf16" else torch.uint8,
+            dtype=torch.bfloat16 if self.kv_cache_dtype == "bf16" else torch.uint8,
             compress_ratio=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
             alignment=self.head_dim * get_dtype_size(torch.bfloat16) if self.kv_cache_dtype == "bf16" else 576,  # NOTE: FP8 FlashMLA requires 576B alignment
@@ -953,7 +952,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                         offset=0,
                     )
                 else:
-                    gather_k_cache(
+                    call_op("gather_k_cache",
                         kv[:chunk_size],
                         compressed_k_cache,
                         seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
@@ -976,7 +975,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                     offset=N,
                 )
             else:
-                gather_k_cache(
+                call_op("gather_k_cache",
                     kv[:chunk_size],
                     swa_k_cache,
                     seq_lens=seq_lens[chunk_start:chunk_end],
@@ -1197,7 +1196,7 @@ class DeepseekV4Indexer(nn.Module):
                 use_fp4=self.use_fp4_kv,
             )
         else:
-            q_quant, weights = fused_indexer_q_rope(
+            q_quant, weights = call_op("fused_indexer_q_rope",
                 positions,
                 q,
                 rotary_emb.cos_sin_cache,
