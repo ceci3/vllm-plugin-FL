@@ -266,3 +266,73 @@ class FlagGemsBackend(Backend):
             scores, n_group, topk_group, topk,
             renormalize, routed_scaling_factor, bias, scoring_func,
         )
+
+    def gather_k_cache(self, out, k_cache, seq_lens, gather_lens, 
+                       block_table, block_size, offset):
+        from .impl.deepseek_v4_ops import gather_k_cache_flaggems
+
+        gather_k_cache_flaggems(
+            out=out, k_cache=k_cache, seq_lens=seq_lens, gather_lens=gather_lens, 
+            block_table=block_table, block_size=block_size, offset=offset
+        )
+
+    def fused_indexer_q_rope(
+            self, 
+            positions,
+            index_q,
+            index_q_cos_sin_cache,
+            index_weights,
+            index_weights_softmax_scale,
+            index_weights_head_scale
+    ):
+        from .impl.deepseek_v4_ops import fused_indexer_q_rope_flaggems
+
+        return fused_indexer_q_rope_flaggems(positions, index_q,
+            index_q_cos_sin_cache, index_weights,
+            index_weights_softmax_scale, index_weights_head_scale)
+    
+    def fused_inv_rope(
+            self,
+            o,
+            positions,
+            cos_sin_cache,
+            n_groups,
+            heads_per_group,
+            nope_dim = 448,
+            rope_dim = 64,
+            quant_group_size = 128,
+            tma_aligned_scales = False,
+    ):
+        from .impl.deepseek_v4_ops import fused_inv_rope_flaggems
+
+        return fused_inv_rope_flaggems(o, positions, cos_sin_cache,
+            n_groups, heads_per_group, nope_dim, rope_dim, quant_group_size,
+            tma_aligned_scales)
+    
+    def gather_bf16_kv_from_pages(
+            self,
+            kv_cache,
+            block_table,
+            cu_seq_lens,
+            token_to_seq,
+            total_seq_lens,
+            dst = None,
+    ):
+        from .impl.deepseek_v4_ops import gather_bf16_kv_from_pages_flaggems
+
+        gather_bf16_kv_from_pages_flaggems(
+            kv_cache, block_table, cu_seq_lens,
+            token_to_seq, total_seq_lens, dst)
+        
+    def bf16_mqa_logits(
+            self,
+            q,
+            kv,
+            weights,
+            cu_seq_len_k_start,
+            cu_seq_len_k_end,
+            clean_logits = True
+    ):
+        from .impl.deepseek_v4_ops import bf16_mqa_logits_flaggems
+
+        bf16_mqa_logits_flaggems(q, kv, weights, cu_seq_len_k_start, cu_seq_len_k_end, clean_logits)

@@ -1,3 +1,4 @@
+# Adapt from vllm v0.20.2 dequantize_and_gather_k_cache
 import torch
 
 from vllm.triton_utils import tl, triton

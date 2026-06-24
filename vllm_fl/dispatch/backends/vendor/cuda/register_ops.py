@@ -153,6 +153,24 @@ def register_builtins(registry) -> None:
             vendor="cuda",
             priority=BackendPriority.VENDOR,
         ),
+        # gather_bf16_kv_from_pages
+        OpImpl(
+            op_name="gather_bf16_kv_from_pages",
+            impl_id="vendor.cuda",
+            kind=BackendImplKind.VENDOR,
+            fn=_bind_is_available(backend.gather_bf16_kv_from_pages, is_avail),
+            vendor="cuda",
+            priority=BackendPriority.VENDOR,
+        ),
+        # bf16_mqa_logits
+        OpImpl(
+            op_name="bf16_mqa_logits",
+            impl_id="vendor.cuda",
+            kind=BackendImplKind.VENDOR,
+            fn=_bind_is_available(backend.bf16_mqa_logits, is_avail),
+            vendor="cuda",
+            priority=BackendPriority.VENDOR,
+        ),
     ]
 
     registry.register_many(impls)

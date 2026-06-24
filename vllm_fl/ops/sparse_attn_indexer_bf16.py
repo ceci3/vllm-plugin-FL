@@ -11,9 +11,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
-    bf16_mqa_logits,
     bf16_paged_mqa_logits,
-    get_paged_mqa_logits_metadata,
     has_deep_gemm,
 )
 from vllm.v1.attention.ops.deepseek_v4_ops.bf16_mqa_logits import (
@@ -35,6 +33,8 @@ if current_platform.is_cuda_alike():
     pass
 elif current_platform.is_xpu():
     from vllm._xpu_ops import xpu_ops
+
+from vllm_fl.dispatch import call_op
 
 logger = init_logger(__name__)
 
@@ -357,7 +357,7 @@ def sparse_attn_indexer_bf16(
                 kv_buf = kv_buf_full[: chunk.total_seq_lens]
 
                 if not chunk.skip_kv_gather:
-                    gather_bf16_kv_from_pages(
+                    call_op("gather_bf16_kv_from_pages",
                         kv_cache,
                         chunk.block_table,
                         chunk.cu_seq_lens,
@@ -366,7 +366,7 @@ def sparse_attn_indexer_bf16(
                         dst=kv_buf,
                     )
 
-                logits = bf16_mqa_logits(
+                logits = call_op("bf16_mqa_logits",
                     q_slice,
                     kv_buf,
                     w_slice,

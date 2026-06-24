@@ -36,14 +36,14 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .deepseek_mtp import SharedHead
-from .deepseek_v2 import get_spec_layer_idx_from_weight_name
+from vllm.model_executor.models.deepseek_mtp import SharedHead
+from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
+from vllm.model_executor.models.utils import maybe_prefix
 from .deepseek_v4 import (
     DeepseekV4DecoderLayer,
     hc_head,
     make_deepseek_v4_expert_params_mapping,
 )
-from .utils import maybe_prefix
 
 logger = init_logger(__name__)
 

@@ -1,3 +1,4 @@
+# Adapt from vllm 0.20.2 fused_inv_rope_fp8_quant
 import torch
 
 from vllm.triton_utils import tl, triton

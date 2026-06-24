@@ -128,6 +128,51 @@ def register_builtins(registry) -> None:
             vendor=None,
             priority=BackendPriority.DEFAULT,
         ),
+        # gather_k_cache
+        OpImpl(
+            op_name="gather_k_cache",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.gather_k_cache, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
+        # fused_indexer_q_rope
+        OpImpl(
+            op_name="fused_indexer_q_rope",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.fused_indexer_q_rope, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
+        # fused_inv_rope
+        OpImpl(
+            op_name="fused_inv_rope",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.fused_inv_rope, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
+        # gather_bf16_kv_from_pages
+        OpImpl(
+            op_name="gather_bf16_kv_from_pages",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.gather_bf16_kv_from_pages, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
+        # bf16_mqa_logits
+        OpImpl(
+            op_name="bf16_mqa_logits",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(backend.bf16_mqa_logits, is_avail),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
     ]
 
     filtered = [impl for impl in impls if use_flaggems_op(impl.op_name)]

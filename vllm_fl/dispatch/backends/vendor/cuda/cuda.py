@@ -330,3 +330,31 @@ class CudaBackend(Backend):
         return fused_inv_rope_cuda(o, positions, cos_sin_cache,
             n_groups, heads_per_group, nope_dim, rope_dim, quant_group_size,
             tma_aligned_scales)
+    
+    def gather_bf16_kv_from_pages(
+            self,
+            kv_cache,
+            block_table,
+            cu_seq_lens,
+            token_to_seq,
+            total_seq_lens,
+            dst = None,
+    ):
+        from .impl.deepseek_v4_ops import gather_bf16_kv_from_pages_cuda
+
+        gather_bf16_kv_from_pages_cuda(
+            kv_cache, block_table, cu_seq_lens,
+            token_to_seq, total_seq_lens, dst)
+        
+    def bf16_mqa_logits(
+            self,
+            q,
+            kv,
+            weights,
+            cu_seq_len_k_start,
+            cu_seq_len_k_end,
+            clean_logits = True
+    ):
+        from .impl.deepseek_v4_ops import bf16_mqa_logits_cuda
+
+        bf16_mqa_logits_cuda(q, kv, weights, cu_seq_len_k_start, cu_seq_len_k_end, clean_logits)
