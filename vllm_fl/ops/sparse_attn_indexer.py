@@ -26,7 +26,14 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.worker.workspace import current_workspace_manager
 
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm_fl.dispatch import call_op
+from vllm_fl.dispatch import CachedOp
+
+_indexer_k_quant_and_cache = CachedOp("indexer_k_quant_and_cache")
+_cp_gather_indexer_k_quant_cache = CachedOp("cp_gather_indexer_k_quant_cache")
+_top_k_per_row_prefill = CachedOp("top_k_per_row_prefill")
+_pack_seq_triton = CachedOp("pack_seq_triton")
+_top_k_per_row_decode = CachedOp("top_k_per_row_decode")
+_unpack_seq_triton = CachedOp("unpack_seq_triton")
 
 logger = init_logger(__name__)
 
@@ -162,7 +169,7 @@ def sparse_attn_indexer_fl(
         # scale_fmt can be None, but the function expects str
         assert scale_fmt is not None
         assert not use_fp4_cache, "Unfused FP4 Insert is not supported yet"
-        call_op("indexer_k_quant_and_cache",
+        _indexer_k_quant_and_cache(
             k,
             kv_cache,
             slot_mapping,
@@ -192,7 +199,7 @@ def sparse_attn_indexer_fl(
             k_scale = k_scale_full[: chunk.total_seq_lens]
 
             if not chunk.skip_kv_gather:
-                call_op("cp_gather_indexer_k_quant_cache",
+                _cp_gather_indexer_k_quant_cache(
                     kv_cache,
                     k_quant,
                     k_scale,
@@ -232,7 +239,7 @@ def sparse_attn_indexer_fl(
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
 
-            call_op("top_k_per_row_prefill",
+            _top_k_per_row_prefill(
                 logits,
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
@@ -259,14 +266,14 @@ def sparse_attn_indexer_fl(
             # packer with pad_byte=0 so padded slots dequantize to 0 and
             # can't produce NaN/Inf in the logits kernel.
             if q_scale is not None:
-                padded_q_quant_decode_tokens = call_op("pack_seq_triton",
+                padded_q_quant_decode_tokens = _pack_seq_triton(
                     q_quant[:num_decode_tokens], decode_lens, pad_value=0
                 )
-                padded_q_scale = call_op("pack_seq_triton",
+                padded_q_scale = _pack_seq_triton(
                     q_scale[:num_decode_tokens], decode_lens, pad_value=0
                 )
             else:
-                padded_q_quant_decode_tokens = call_op("pack_seq_triton",
+                padded_q_quant_decode_tokens = _pack_seq_triton(
                     q_quant[:num_decode_tokens], decode_lens
                 )
                 padded_q_scale = None
@@ -307,7 +314,7 @@ def sparse_attn_indexer_fl(
         )
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
-        call_op("top_k_per_row_decode",
+        _top_k_per_row_decode(
                 logits,
                 next_n,
                 seq_lens,
@@ -346,7 +353,7 @@ def sparse_attn_indexer_fl(
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
             # the topk indices removing padded tokens
-            topk_indices = call_op("unpack_seq_triton",
+            topk_indices = _unpack_seq_triton(
                 topk_indices.reshape(batch_size, -1, topk_indices.shape[-1]),
                 decode_lens,
             )

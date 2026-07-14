@@ -1,7 +1,9 @@
 import torch
 from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
-from vllm_fl.dispatch import call_op
+from vllm_fl.dispatch import CachedOp
+
+_router_gemm_bf16_fp32 = CachedOp("router_gemm_bf16_fp32")
 
 class GateLinearFL(GateLinear):
     def __init__(self, *args, **kwargs):
@@ -23,7 +25,7 @@ class GateLinearFL(GateLinear):
 
         # Tier 2: cuBLAS bf16->fp32
         if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
-            output = call_op("router_gemm_bf16_fp32", x, self.weight)
+            output = _router_gemm_bf16_fp32( x, self.weight)
             return output, None
 
         # Tier 3: F.linear (ReplicatedLinear)
@@ -33,4 +35,3 @@ class GateLinearFL(GateLinear):
         if self.out_dtype is not None and output.dtype != self.out_dtype:
             output = output.to(self.out_dtype)
         return output, output_bias
-

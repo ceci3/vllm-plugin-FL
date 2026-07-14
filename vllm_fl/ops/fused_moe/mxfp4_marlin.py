@@ -6,7 +6,9 @@ from __future__ import annotations
 import torch
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import MarlinExperts
-from vllm_fl.dispatch import call_op
+from vllm_fl.dispatch import CachedOp
+
+_fused_marlin_moe = CachedOp("fused_marlin_moe")
 
 
 class MarlinExpertsFL(MarlinExperts):
@@ -18,8 +20,7 @@ class MarlinExpertsFL(MarlinExperts):
         apply_router_weight_on_input, activation_func, moe_sum,
         clamp_limit=None,
     ):
-        return call_op(
-            "fused_marlin_moe",
+        return _fused_marlin_moe(
             hidden_states=hidden_states, w1=w1, w2=w2,
             bias1=self.w1_bias, bias2=self.w2_bias,
             w1_scale=self.w1_scale, w2_scale=self.w2_scale,

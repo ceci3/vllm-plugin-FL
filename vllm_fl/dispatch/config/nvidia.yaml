@@ -54,9 +54,6 @@ flagos_blacklist:
   - index_put
   - _index_put_impl_
   - nonzero
-  #  - cat
-  #  - index
-  #  - mul
-
+  - index
 # OOT (Out-of-Tree) operator blacklist
 # oot_blacklist: []

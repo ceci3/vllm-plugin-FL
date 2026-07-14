@@ -23,7 +23,13 @@ from vllm.model_executor.layers.deepseek_v4_attention import (
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE, GateLinear
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
-from vllm_fl.dispatch import BackendImplKind, call_op, get_default_manager
+from vllm_fl.dispatch import BackendImplKind, CachedOp, get_default_manager
+
+_deepseek_v4_mega_moe_experts = CachedOp("deepseek_v4_mega_moe_experts")
+_fused_topk_bias = CachedOp("fused_topk_bias")
+_mhc_pre = CachedOp("mhc_pre")
+_mhc_post = CachedOp("mhc_post")
+_hc_head_fused_kernel = CachedOp("hc_head_fused_kernel")
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -745,8 +751,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 f"but the symmetric buffer was sized for {self.max_num_tokens}."
             )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-        call_op(
-            "deepseek_v4_mega_moe_experts",
+        _deepseek_v4_mega_moe_experts(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
@@ -1001,8 +1006,7 @@ class DeepseekV4MoE(nn.Module):
 
         org_shape = hidden_states.shape
         router_logits, _ = self.gate(hidden_states)
-        topk_weights, topk_ids = call_op(
-            "fused_topk_bias",
+        topk_weights, topk_ids = _fused_topk_bias(
             hidden_states=hidden_states,
             gating_output=router_logits,
             scoring_func=self.scoring_func,
@@ -1310,8 +1314,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
     ):
-        post_mix, res_mix, layer_input = call_op(
-            "mhc_pre",
+        post_mix, res_mix, layer_input = _mhc_pre(
             residual=x,
             fn=hc_fn,
             hc_scale=hc_scale,
@@ -1331,7 +1334,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         post: torch.Tensor,
         comb: torch.Tensor,
     ):
-        return call_op("mhc_post", x=x, residual=residual, post=post, comb=comb)
+        return _mhc_post( x=x, residual=residual, post=post, comb=comb)
 
     def forward(
         self,
@@ -1606,8 +1609,7 @@ def hc_head(
     out = torch.empty(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
     )
-    call_op(
-        "hc_head_fused_kernel",
+    _hc_head_fused_kernel(
         hs_flat=hs_flat,
         fn=hc_fn,
         hc_scale=hc_scale,

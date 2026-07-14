@@ -20,7 +20,22 @@ from vllm.model_executor.layers.linear import (
 from vllm_fl.ops.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.utils import cublas_gemm_bf16_bf16_fp32
 from vllm.utils.deep_gemm import fp8_einsum
-from vllm_fl.dispatch import call_op
+from vllm_fl.dispatch import CachedOp
+
+_fused_inv_rope_fp8_quant = CachedOp("fused_inv_rope_fp8_quant")
+_deepseek_v4_fp8_einsum = CachedOp("deepseek_v4_fp8_einsum")
+_fused_q_kv_rmsnorm = CachedOp("fused_q_kv_rmsnorm")
+_fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert = CachedOp(
+    "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert"
+)
+_compute_global_topk_indices_and_lens = CachedOp(
+    "compute_global_topk_indices_and_lens"
+)
+_flash_mla_with_kvcache = CachedOp("flash_mla_with_kvcache")
+_dequantize_and_gather_k_cache = CachedOp("dequantize_and_gather_k_cache")
+_combine_topk_swa_indices = CachedOp("combine_topk_swa_indices")
+_flash_mla_sparse_fwd = CachedOp("flash_mla_sparse_fwd")
+_fused_indexer_q_rope_quant = CachedOp("fused_indexer_q_rope_quant")
 from vllm.utils.torch_utils import direct_register_custom_op
 
 if TYPE_CHECKING:
@@ -69,7 +84,6 @@ from vllm.model_executor.layers.deepseek_v4_attention import (
     DeepseekV4MLAModules,
     PREFILL_CHUNK_SIZE,
     )
-from vllm_fl.dispatch import call_op
 
 logger = init_logger(__name__)
 
@@ -180,7 +194,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
         o = o_padded[:, : self.n_local_heads, :]
 
         # O projection: inverse RoPE + FP8 quant + einsum + wo_b
-        o_fp8, o_scale = call_op("fused_inv_rope_fp8_quant",
+        o_fp8, o_scale = _fused_inv_rope_fp8_quant(
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
@@ -200,8 +214,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
             dtype=torch.bfloat16,
         )
 
-        call_op(
-            "deepseek_v4_fp8_einsum",
+        _deepseek_v4_fp8_einsum(
             o_fp8,
             o_scale,
             wo_a_fp8,
@@ -280,7 +293,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
         )
 
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
-        qr, kv = call_op("fused_q_kv_rmsnorm",
+        qr, kv = _fused_q_kv_rmsnorm(
             qr,
             kv,
             self.q_norm.weight.data,
@@ -396,10 +409,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
         #   Q side:  q_head_norm (per-head RMSNorm, no weight) + GPT-J RoPE
         #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert
         # kv is unchanged; mla_attn reads kv solely via swa_kv_cache.
-        from vllm_fl.dispatch import call_op
-
-        call_op(
-            "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
+        _fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             q,
             kv,
             swa_kv_cache_2d,
@@ -645,7 +655,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             if self.compress_ratio == 4:
                 # C4A: local indices differ per layer (filled by Indexer).
                 assert self.topk_indices_buffer is not None
-                global_indices, topk_lens = call_op("compute_global_topk_indices_and_lens",
+                global_indices, topk_lens = _compute_global_topk_indices_and_lens(
                     self.topk_indices_buffer[:num_decode_tokens],
                     swa_metadata.token_to_req_indices,
                     attn_metadata.block_table[:num_decodes],
@@ -697,7 +707,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             "allocate one for this layer type."
         )
 
-        out, _ = call_op("flash_mla_with_kvcache",
+        out, _ = _flash_mla_with_kvcache(
             q=q,
             k_cache=swa_cache,
             block_table=None,
@@ -781,7 +791,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 # Gather compressed KV
                 assert attn_metadata is not None
                 block_table = attn_metadata.block_table[num_decodes:]
-                call_op("dequantize_and_gather_k_cache",
+                _dequantize_and_gather_k_cache(
                     kv[:chunk_size],
                     compressed_k_cache,
                     seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
@@ -793,7 +803,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
             # Gather SWA KV
             swa_block_table = swa_metadata.block_table[num_decodes:]
-            call_op("dequantize_and_gather_k_cache",
+            _dequantize_and_gather_k_cache(
                 kv[:chunk_size],
                 swa_k_cache,
                 seq_lens=seq_lens[chunk_start:chunk_end],
@@ -811,7 +821,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
             )
 
-            combined_indices, combined_lens = call_op("combine_topk_swa_indices",
+            combined_indices, combined_lens = _combine_topk_swa_indices(
                 topk_indices[query_start:query_end],
                 query_start_loc[
                     num_decodes + chunk_start : num_decodes + chunk_end + 1
@@ -824,7 +834,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 M,
                 N,
             )
-            output_chunk, _, _ = call_op("flash_mla_sparse_fwd",
+            output_chunk, _, _ = _flash_mla_sparse_fwd(
                 q=q[query_start:query_end],
                 kv=kv.view(-1, 1, q.shape[-1]),
                 indices=combined_indices.unsqueeze(1),
@@ -987,7 +997,7 @@ class DeepseekV4Indexer(nn.Module):
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
         k = self.compressor(compressed_kv_score, positions, rotary_emb)
-        q_quant, weights = call_op("fused_indexer_q_rope_quant",
+        q_quant, weights = _fused_indexer_q_rope_quant(
             positions,
             q,
             rotary_emb.cos_sin_cache,
