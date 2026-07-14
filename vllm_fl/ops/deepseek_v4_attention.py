@@ -65,11 +65,10 @@ from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 from vllm.model_executor.layers.deepseek_v4_attention import (
-    DeepseekV4MultiHeadLatentAttentionWrapper, 
+    DeepseekV4MultiHeadLatentAttentionWrapper,
     DeepseekV4MLAModules,
     PREFILL_CHUNK_SIZE,
     )
-from vllm.model_executor.utils import replace_parameter
 from vllm_fl.dispatch import call_op
 
 logger = init_logger(__name__)
@@ -126,8 +125,6 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
             + 1  # 1B pad
         )
         del self.mla_attn
-        # Reshape deferred to process_weights_after_loading (after weight load)
-        self._wo_a_needs_reshape = getattr(self.wo_a, "is_bmm", False)
 
         self.mla_attn = DeepseekV4MLAAttention(
             num_heads=self.n_local_heads,
@@ -157,27 +154,6 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
         if self.layer_name in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         compilation_config.static_forward_context[self.layer_name] = self
-        self.process_weights_after_loading()
-
-    def process_weights_after_loading(self) -> None:
-        if self._wo_a_needs_reshape:
-            wo_a_tmp = self._post_process_weight(
-                self.wo_a.weight, self.wo_a.is_bmm,
-                self.wo_a.bmm_batch_size)
-            wo_a_scale_tmp = self._post_process_weight(
-                self.wo_a.weight_scale_inv, self.wo_a.is_bmm,
-                self.wo_a.bmm_batch_size)
-            replace_parameter(self.wo_a, "weight", wo_a_tmp)
-            replace_parameter(self.wo_a, "weight_scale_inv", wo_a_scale_tmp)
-
-    def _post_process_weight(self, w: nn.Parameter, is_bmm: bool, bmm_batch_size: int | None) -> None:
-        if is_bmm:
-            g = bmm_batch_size
-            assert w.ndim == 2 and w.ndim == 2
-            d = w.size(1)
-            r = w.size(0) // g
-            w = w.view(g, r, d)
-        return w
 
     def forward(
         self,

@@ -63,6 +63,18 @@ class CudaBackend(Backend):
 
     # ==================== Operator Implementations ====================
 
+    def fused_marlin_moe(self, *args, **kwargs) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
+        return fused_marlin_moe(*args, **kwargs)
+
+    def router_gemm_bf16_fp32(
+        self, x: torch.Tensor, weight: torch.Tensor
+    ) -> torch.Tensor:
+        """Run vLLM's CUDA BF16 router GEMM with an FP32 output."""
+        from .impl.router_gemm import router_gemm_bf16_fp32_cuda
+
+        return router_gemm_bf16_fp32_cuda(x, weight)
+
     def silu_and_mul(self, obj, x: torch.Tensor) -> torch.Tensor:
         """
         SiLU activation followed by element-wise multiplication.
@@ -97,7 +109,7 @@ class CudaBackend(Backend):
 
         return gelu_and_mul_cuda(obj, x)
 
-    def silu_and_mul_with_clamp(self, x: torch.Tensor, swiglu_limit: float) -> torch.Tensor:
+    def silu_and_mul_with_clamp(self, x: torch.Tensor, swiglu_limit: float, swiglu_limit_tensor: torch.Tensor) -> torch.Tensor:
         from .impl.activation import silu_and_mul_with_clamp_cuda
 
         return silu_and_mul_with_clamp_cuda(x, swiglu_limit)
@@ -651,4 +663,3 @@ class CudaBackend(Backend):
         return flash_mla_sparse_fwd_cuda(
             q, kv, indices, sm_scale, attn_sink, topk_length, out,
         )
-

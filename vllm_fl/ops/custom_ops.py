@@ -33,6 +33,7 @@ OOT_OPS = {
         DeepseekV4MultiHeadLatentAttentionFLWrapper,
         "DeepseekV4MultiHeadLatentAttentionWrapper"
     ),  # noqa F405
+    "gated_layer": (GateLinearFL, "GateLinear"),
 }
 
 def register_oot_ops(whitelist: Optional[List[str]] = None) -> None:

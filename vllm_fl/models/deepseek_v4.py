@@ -23,7 +23,7 @@ from vllm.model_executor.layers.deepseek_v4_attention import (
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE, GateLinear
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
-from vllm_fl.dispatch import call_op
+from vllm_fl.dispatch import BackendImplKind, call_op, get_default_manager
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -46,7 +46,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
@@ -64,6 +64,140 @@ from vllm_fl.ops.deepseek_v4_attention import (
 )
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
+
+
+def _torch_post_process_fp8_weight_block_bmm(
+    wq: torch.Tensor,
+    ws: torch.Tensor,
+    quant_block_shape: tuple[int, int],
+    bmm_batch_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Torch-only subset of DeepGEMM's FP8 post-processing for BMM.
+
+    When DeepGEMM is unavailable, scales remain in their ordinary FP32 block
+    layout; only the leading expert dimension required by fp8_einsum is
+    restored.  E8M0 checkpoint scales are losslessly expanded to FP32.
+    """
+    if wq.dtype != torch.float8_e4m3fn:
+        raise TypeError(f"Expected FP8 weights, got {wq.dtype}")
+    if wq.ndim != 2 or ws.ndim != 2:
+        raise ValueError("Expected two-dimensional FP8 weights and scales")
+    if bmm_batch_size <= 0 or wq.size(0) % bmm_batch_size:
+        raise ValueError("Weight rows must be divisible by bmm_batch_size")
+
+    if ws.dtype == torch.float8_e8m0fnu:
+        exponent = ws.view(torch.uint8).to(torch.int32)
+        ws = (exponent << 23).view(torch.float32)
+    elif ws.dtype != torch.float32:
+        raise TypeError(f"Expected FP32 or E8M0 scales, got {ws.dtype}")
+
+    block_m, block_k = quant_block_shape
+    rows = wq.size(0) // bmm_batch_size
+    cols = wq.size(1)
+    expected_scale_shape = (
+        bmm_batch_size * rows // block_m,
+        cols // block_k,
+    )
+    if tuple(ws.shape) != expected_scale_shape:
+        raise ValueError(
+            f"Expected scale shape {expected_scale_shape}, got {tuple(ws.shape)}"
+        )
+
+    return (
+        wq.view(bmm_batch_size, rows, cols),
+        ws.view(bmm_batch_size, rows // block_m, cols // block_k),
+    )
+
+
+class WOAColumnParallelLinear(ColumnParallelLinear):
+    """ColumnParallelLinear variant for wo_a that reshapes weights to 3D
+    for grouped BMM (fp8_einsum) after quantization processing."""
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        gather_output: bool = False,
+        skip_bias_add: bool = False,
+        params_dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+        disable_tp: bool = False,
+    ):
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            bias=bias,
+            gather_output=gather_output,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            quant_config=quant_config,
+            prefix=prefix,
+            return_bias=return_bias,
+            disable_tp=disable_tp,
+        )
+        # Fix the FP8 einsum scale layout during weight initialization.
+        # FlagGems consumes the ordinary 3D FP32 block-scale grid, while
+        # DeepGEMM consumes its architecture-specific transformed layout.
+        orig_fn = self.quant_method.process_weights_after_loading
+
+        def _process_weights_after_loading(layer):
+            orig_fn(layer)
+            if not getattr(layer, "is_bmm", False):
+                return
+            w = layer.weight
+            if w.ndim != 2:
+                # Already reshaped by the kernel (e.g. DeepGemm kernel)
+                return
+
+            g = layer.bmm_batch_size
+            ws = getattr(layer, "weight_scale_inv", None)
+            scale_attr = "weight_scale_inv"
+            if ws is None:
+                ws = layer.weight_scale
+                scale_attr = "weight_scale"
+
+            block_size = getattr(layer, "weight_block_size", [128, 128])
+            candidates = get_default_manager().resolve_candidates(
+                "deepseek_v4_fp8_einsum"
+            )
+            use_flaggems = (
+                candidates[0].kind == BackendImplKind.DEFAULT
+                and candidates[0].impl_id == "default.flagos"
+            )
+            if use_flaggems:
+                processed_weight, processed_scale = (
+                    _torch_post_process_fp8_weight_block_bmm(
+                        wq=w,
+                        ws=ws,
+                        quant_block_shape=tuple(block_size),
+                        bmm_batch_size=g,
+                    )
+                )
+            else:
+                from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+                    deepgemm_post_process_fp8_weight_block,
+                )
+                from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+
+                dg_weight, dg_scale = deepgemm_post_process_fp8_weight_block(
+                    wq=w,
+                    ws=ws,
+                    quant_block_shape=tuple(block_size),
+                    use_e8m0=is_deep_gemm_e8m0_used(),
+                    is_bmm=True,
+                    bmm_batch_size=g,
+                )
+                processed_weight, processed_scale = dg_weight, dg_scale
+            replace_parameter(layer, "weight", processed_weight)
+            replace_parameter(layer, scale_attr, processed_scale)
+
+        self.quant_method.process_weights_after_loading = (
+            _process_weights_after_loading
+        )
 
 
 class DeepseekV4MLP(nn.Module):
@@ -989,7 +1123,7 @@ class DeepseekV4Attention(nn.Module):
         )
 
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
-        self.wo_a = ColumnParallelLinear(
+        self.wo_a = WOAColumnParallelLinear(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * self.o_lora_rank,
             bias=False,

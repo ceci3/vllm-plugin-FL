@@ -46,7 +46,7 @@ def gelu_and_mul_flaggems(obj, x: torch.Tensor) -> torch.Tensor:
     return gelu_and_mul(x1, x2, approximate)
 
 
-def silu_and_mul_with_clamp_flaggems(x: torch.Tensor, swiglu_limit: float) -> torch.Tensor:
+def silu_and_mul_with_clamp_flaggems(x: torch.Tensor, swiglu_limit: torch.Tensor) -> torch.Tensor:
     """
     SiLU activation with clamping followed by element-wise multiplication using FlagGems.
 
@@ -62,8 +62,8 @@ def silu_and_mul_with_clamp_flaggems(x: torch.Tensor, swiglu_limit: float) -> to
     Returns:
         Output tensor of shape [..., d]
     """
-    from flag_gems import silu_and_mul_with_clamp
+    from flag_gems.fused.silu_and_mul_with_clamp import silu_and_mul_with_clamp_kernel
 
     d = x.shape[-1] // 2
     gate, up = x[..., :d], x[..., d:]
-    return silu_and_mul_with_clamp(gate, up, swiglu_limit)
+    return silu_and_mul_with_clamp_kernel(gate, up, swiglu_limit)

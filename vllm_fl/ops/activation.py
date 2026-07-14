@@ -24,9 +24,14 @@ class GeluAndMulFL(GeluAndMul):
 class SiluAndMulWithClampFL(SiluAndMulWithClamp):
     def __init__(self, swiglu_limit: float):
         super().__init__(swiglu_limit)
+        self.register_buffer(
+              "_swiglu_limit_tensor",
+              torch.tensor(swiglu_limit, dtype=torch.bfloat16),
+              persistent=False,
+          )
 
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-        return call_op("silu_and_mul_with_clamp", x, self.swiglu_limit)
+        return call_op("silu_and_mul_with_clamp", x, self.swiglu_limit, self._swiglu_limit_tensor)
 
 
 __all__ = ["SiluAndMulFL", "GeluAndMulFL", "SiluAndMulWithClampFL"]

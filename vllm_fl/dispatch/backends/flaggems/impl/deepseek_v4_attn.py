@@ -4,6 +4,7 @@
 FlagGems implementations for DeepseekV4 attention operators.
 """
 from typing import Optional, Tuple
+
 import torch
 
 
@@ -22,12 +23,20 @@ def deepseek_v4_fp8_einsum_flaggems(
     Performs FP8 einsum: out = einsum(equation, (a, a_scale), (b, b_scale))
     Mutates `out` in-place.
     """
-    # import flag_gems
+    import flag_gems
 
-    # flag_gems.deepseek_v4_fp8_einsum(
-    #     a, a_scale, b, b_scale, out, equation, recipe,
-    # )
-    raise NotImplementedError("deepseek_v4_fp8_einsum_flaggems is not implemented yet.")
+    if len(recipe) < 2:
+        raise ValueError(f"Invalid FP8 einsum recipe: {recipe}")
+    result = flag_gems.fp8_einsum(
+        equation,
+        a,
+        a_scale,
+        b,
+        b_scale,
+        block_size=list(recipe[-2:]),
+        output_dtype=out.dtype,
+    )
+    out.copy_(result)
 
 
 def fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_flaggems(
@@ -96,7 +105,7 @@ def compute_global_topk_indices_and_lens_flaggems(
     )
 
 
-def dequantize_and_gather_k_cache_cuda(
+def dequantize_and_gather_k_cache_flaggems(
     out: torch.Tensor,
     k_cache: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -273,14 +282,32 @@ def flash_mla_with_kvcache_flaggems(
         extra_topk_length,
         out,
     ):
-        import flag_gems
-        return flag_gems.flash_mla_with_kvcache(
+        from flag_gems.fused.flash_mla_with_kvcache import (
+            FlashMLASchedMeta,
+            flash_mla_with_kvcache,
+        )
+
+        # vLLM and FlagGems expose the same scheduler fields through separate
+        # dataclass types. Adapt at the backend boundary and synchronize the
+        # graph-capture buffers back into the vLLM-owned metadata object.
+        original_meta = tile_scheduler_metadata
+        if isinstance(original_meta, FlashMLASchedMeta):
+            flaggems_meta = original_meta
+        else:
+            flaggems_meta = FlashMLASchedMeta(
+                have_initialized=original_meta.have_initialized,
+                config=original_meta.config,
+                tile_scheduler_metadata=original_meta.tile_scheduler_metadata,
+                num_splits=original_meta.num_splits,
+            )
+
+        result = flash_mla_with_kvcache(
             q=q, 
             k_cache=k_cache, 
             block_table=block_table, 
             cache_seqlens=cache_seqlens, 
             head_dim_v=head_dim_v, 
-            tile_scheduler_metadata=tile_scheduler_metadata,
+            tile_scheduler_metadata=flaggems_meta,
             is_fp8_kvcache=is_fp8_kvcache, 
             indices=indices, 
             topk_length=topk_length, 
@@ -291,6 +318,14 @@ def flash_mla_with_kvcache_flaggems(
             extra_topk_length=extra_topk_length,
             out=out,
         )
+        if flaggems_meta is not original_meta:
+            original_meta.have_initialized = flaggems_meta.have_initialized
+            original_meta.config = flaggems_meta.config
+            original_meta.tile_scheduler_metadata = (
+                flaggems_meta.tile_scheduler_metadata
+            )
+            original_meta.num_splits = flaggems_meta.num_splits
+        return result
 
 def flash_mla_sparse_fwd_flaggems(
         q,
@@ -312,4 +347,4 @@ def flash_mla_sparse_fwd_flaggems(
         topk_length=topk_length)
     out.copy_(out_tmp)
     
-    return out, max_logits, lse 
+    return out, max_logits, lse

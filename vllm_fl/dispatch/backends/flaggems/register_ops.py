@@ -26,6 +26,20 @@ def _bind_is_available(fn, is_available_fn):
     return wrapper
 
 
+def _has_flaggems_op(op_name: str):
+    """Build an availability check from FlagGems' active backend exports."""
+
+    def is_available() -> bool:
+        try:
+            import flag_gems
+
+            return hasattr(flag_gems, op_name)
+        except ImportError:
+            return False
+
+    return is_available
+
+
 def register_builtins(registry) -> None:
     """
     Register all FlagGems (DEFAULT) operator implementations.
@@ -39,6 +53,22 @@ def register_builtins(registry) -> None:
     is_avail = backend.is_available
 
     impls = [
+        OpImpl(op_name="fused_marlin_moe", impl_id="default.flagos",
+               kind=BackendImplKind.DEFAULT,
+               fn=_bind_is_available(backend.fused_marlin_moe, is_avail),
+               vendor=None, priority=BackendPriority.DEFAULT),
+        # MoE router GEMM (BF16 inputs, FP32 output)
+        OpImpl(
+            op_name="router_gemm_bf16_fp32",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(
+                backend.router_gemm_bf16_fp32,
+                _has_flaggems_op("router_gemm"),
+            ),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
         # Activation
         OpImpl(
             op_name="silu_and_mul",
@@ -172,21 +202,15 @@ def register_builtins(registry) -> None:
             vendor=None,
             priority=BackendPriority.DEFAULT,
         ),
-        # deepseek_v4_mega_moe_experts
-        OpImpl(
-            op_name="deepseek_v4_mega_moe_experts",
-            impl_id="default.flagos",
-            kind=BackendImplKind.DEFAULT,
-            fn=_bind_is_available(backend.deepseek_v4_mega_moe_experts, is_avail),
-            vendor=None,
-            priority=BackendPriority.DEFAULT,
-        ),
         # deepseek_v4_fp8_einsum
         OpImpl(
             op_name="deepseek_v4_fp8_einsum",
             impl_id="default.flagos",
             kind=BackendImplKind.DEFAULT,
-            fn=_bind_is_available(backend.deepseek_v4_fp8_einsum, is_avail),
+            fn=_bind_is_available(
+                backend.deepseek_v4_fp8_einsum,
+                _has_flaggems_op("fp8_einsum"),
+            ),
             vendor=None,
             priority=BackendPriority.DEFAULT,
         ),
@@ -312,7 +336,10 @@ def register_builtins(registry) -> None:
             op_name="flash_mla_with_kvcache",
             impl_id="default.flagos",
             kind=BackendImplKind.DEFAULT,
-            fn=_bind_is_available(backend.flash_mla_with_kvcache, is_avail),
+            fn=_bind_is_available(
+                backend.flash_mla_with_kvcache,
+                _has_flaggems_op("flash_mla_with_kvcache"),
+            ),
             vendor=None,
             priority=BackendPriority.DEFAULT,
         ),

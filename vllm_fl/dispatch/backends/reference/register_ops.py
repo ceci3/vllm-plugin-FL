@@ -37,6 +37,15 @@ def register_builtins(registry) -> None:
     is_avail = backend.is_available
 
     impls = [
+        # MoE router GEMM (BF16 inputs, FP32 output)
+        OpImpl(
+            op_name="router_gemm_bf16_fp32",
+            impl_id="reference.torch",
+            kind=BackendImplKind.REFERENCE,
+            fn=_bind_is_available(backend.router_gemm_bf16_fp32, is_avail),
+            vendor=None,
+            priority=BackendPriority.REFERENCE,
+        ),
         # Activation
         OpImpl(
             op_name="silu_and_mul",

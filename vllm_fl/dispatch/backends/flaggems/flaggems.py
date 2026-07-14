@@ -42,6 +42,49 @@ class FlagGemsBackend(Backend):
 
     # ==================== Operator Implementations ====================
 
+    def fused_marlin_moe(self, *args, **kwargs) -> torch.Tensor:
+        from flag_gems.fused.fused_marlin_moe import fused_marlin_moe
+
+        # Current vLLM encodes ScalarType as a structured 64-bit integer,
+        # while FlagGems' Marlin MVP still uses its legacy enum values.
+        # Translate only at the FlagGems boundary; the CUDA vendor backend
+        # must continue receiving the original vLLM ScalarType id.
+        from vllm.scalar_type import scalar_types
+
+        quant_type_map = {
+            scalar_types.uint4b8.id: 0,
+            scalar_types.uint8b128.id: 1,
+            scalar_types.float4_e2m1f.id: 6,
+        }
+        args = list(args)
+        if "quant_type_id" in kwargs:
+            kwargs = dict(kwargs)
+            quant_type_id = kwargs["quant_type_id"]
+            if quant_type_id not in quant_type_map:
+                raise NotImplementedError(
+                    "FlagGems fused_marlin_moe does not support vLLM "
+                    f"quant_type_id={quant_type_id}"
+                )
+            kwargs["quant_type_id"] = quant_type_map[quant_type_id]
+        elif len(args) > 9:
+            quant_type_id = args[9]
+            if quant_type_id not in quant_type_map:
+                raise NotImplementedError(
+                    "FlagGems fused_marlin_moe does not support vLLM "
+                    f"quant_type_id={quant_type_id}"
+                )
+            args[9] = quant_type_map[quant_type_id]
+
+        return fused_marlin_moe(*args, **kwargs)
+
+    def router_gemm_bf16_fp32(
+        self, x: torch.Tensor, weight: torch.Tensor
+    ) -> torch.Tensor:
+        """Run the MoE router GEMM with an FP32 output."""
+        from .impl.router_gemm import router_gemm_bf16_fp32_flaggems
+
+        return router_gemm_bf16_fp32_flaggems(x, weight)
+
     def silu_and_mul(self, obj, x: torch.Tensor) -> torch.Tensor:
         """
         SiLU activation followed by element-wise multiplication.
@@ -72,10 +115,10 @@ class FlagGemsBackend(Backend):
 
         return gelu_and_mul_flaggems(obj, x)
 
-    def silu_and_mul_with_clamp(self, x: torch.Tensor, swiglu_limit: float) -> torch.Tensor:
+    def silu_and_mul_with_clamp(self, x: torch.Tensor, swiglu_limit: float, swiglu_limit_tensor: torch.Tensor) -> torch.Tensor:
         from .impl.activation import silu_and_mul_with_clamp_flaggems
 
-        return silu_and_mul_with_clamp_flaggems(x, swiglu_limit)
+        return silu_and_mul_with_clamp_flaggems(x, swiglu_limit_tensor)
 
     def rms_norm(
         self,
@@ -355,10 +398,12 @@ class FlagGemsBackend(Backend):
         activation_clamp: float | None,
         fast_math: bool,
     ):
-        # No FlagGems equivalent, delegate to vLLM CUDA kernel
-        torch.ops.vllm.deepseek_v4_mega_moe_experts(
-            hidden_states, topk_weights, topk_ids, out,
-            layer_name, activation_clamp, fast_math,
+        # The new FlagGems fp8_fp4_mega_moe primitive is single-rank and
+        # consumes staged tensors/raw weights. This dispatch contract is the
+        # distributed vLLM layer-level op, so it is not directly compatible.
+        raise NotImplementedError(
+            "FlagGems fp8_fp4_mega_moe does not implement the distributed "
+            "deepseek_v4_mega_moe_experts contract"
         )
 
     def deepseek_v4_fp8_einsum(
