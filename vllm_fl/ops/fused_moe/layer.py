@@ -34,8 +34,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 
 from .fused_moe_utils import select_unquantized_moe_backend_oot
-from .mxfp4_flaggems import select_fixed_mxfp4_method
-from .mxfp4_marlin import MarlinExpertsFL
+from .mxfp4_selector import select_fixed_mxfp4_method
+from vllm_fl.quantization.mxfp4.mxfp4_marlin import MarlinExpertsFL
 
 class UnquantizedFusedMoEMethodFL(UnquantizedFusedMoEMethod):
     """OOT replacement for UnquantizedFusedMoEMethod that routes computation through flaggems."""

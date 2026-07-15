@@ -44,6 +44,14 @@ class ReferenceBackend(Backend):
 
     # ==================== Operator Implementations ====================
 
+    def fused_marlin_moe(self, *args, **kwargs) -> torch.Tensor:
+        """Call vLLM's native Marlin MoE implementation as a fallback."""
+        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+            fused_marlin_moe,
+        )
+
+        return fused_marlin_moe(*args, **kwargs)
+
     def router_gemm_bf16_fp32(
         self, x: torch.Tensor, weight: torch.Tensor
     ) -> torch.Tensor:

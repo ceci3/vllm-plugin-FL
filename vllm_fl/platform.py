@@ -384,10 +384,18 @@ class PlatformFL(Platform):
         if cls.device_name == "npu":
             import vllm_fl.dispatch.backends.vendor.ascend
 
+    @classmethod
     def supports_fp8(cls) -> bool:
-        if cls.vendor_name == "nvidia":
+        """Return whether the current device architecture supports FP8."""
+        if cls.vendor_name == "mthreads":
             return True
-        return False
+        if cls.vendor_name != "nvidia":
+            return False
+        try:
+            capability = cls.get_device_capability()
+        except (AttributeError, RuntimeError):
+            return False
+        return capability is not None and capability >= DeviceCapability(8, 9)
 
     @classmethod
     def get_device_uuid(cls, device_id: int = 0) -> str:

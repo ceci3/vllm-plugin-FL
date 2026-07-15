@@ -12,7 +12,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     mxfp4_w4a16_moe_quant_config,
 )
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     make_mxfp4_moe_kernel,
@@ -25,12 +24,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
 )
-
-from vllm_fl.dispatch import BackendImplKind, get_default_manager
-
-
-logger = init_logger(__name__)
-
 
 class FlagGemsMxfp4Experts(mk.FusedMoEExpertsModular):
     """FlagGems MXFP4 experts consuming checkpoint-native uint8 weights."""
@@ -190,7 +183,7 @@ class FlagGemsMxfp4MoEMethod(Mxfp4MoEMethod):
         )
 
 
-def _flaggems_mxfp4_compatible(moe: FusedMoEConfig) -> bool:
+def flaggems_mxfp4_compatible(moe: FusedMoEConfig) -> bool:
     return (
         torch.cuda.is_available()
         and torch.cuda.get_device_capability()[0] >= 9
@@ -203,37 +196,8 @@ def _flaggems_mxfp4_compatible(moe: FusedMoEConfig) -> bool:
     )
 
 
-def select_fixed_mxfp4_method(
-    method: Mxfp4MoEMethod,
-    moe: FusedMoEConfig,
-) -> Mxfp4MoEMethod:
-    """Fix MXFP4 weight layout and experts from the initialization policy."""
-    manager = get_default_manager()
-    for candidate in manager.resolve_candidates("fused_marlin_moe"):
-        if candidate.kind == BackendImplKind.DEFAULT:
-            if (
-                candidate.impl_id == "default.flagos"
-                and _flaggems_mxfp4_compatible(moe)
-            ):
-                logger.info(
-                    "MXFP4 backend fixed to FlagGems; preserving native uint8 weights"
-                )
-                return FlagGemsMxfp4MoEMethod.from_method(method)
-            continue
-
-        if candidate.kind == BackendImplKind.VENDOR:
-            logger.info(
-                "MXFP4 backend fixed to %s; using Marlin weight conversion",
-                candidate.impl_id,
-            )
-            return method
-
-    logger.info("No compatible FlagGems MXFP4 backend; using vLLM Marlin")
-    return method
-
-
 __all__ = [
     "FlagGemsMxfp4Experts",
     "FlagGemsMxfp4MoEMethod",
-    "select_fixed_mxfp4_method",
+    "flaggems_mxfp4_compatible",
 ]
