@@ -358,3 +358,4 @@ class CudaBackend(Backend):
         from .impl.deepseek_v4_ops import bf16_mqa_logits_cuda
 
         bf16_mqa_logits_cuda(q, kv, weights, cu_seq_len_k_start, cu_seq_len_k_end, clean_logits)
+
