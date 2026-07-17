@@ -19,7 +19,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm_fl.ops.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.utils import cublas_gemm_bf16_bf16_fp32
-from vllm.utils.deep_gemm import fp8_einsum
 from vllm_fl.dispatch import CachedOp
 
 _fused_inv_rope_fp8_quant = CachedOp("fused_inv_rope_fp8_quant")
@@ -48,7 +47,6 @@ from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
 )
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
