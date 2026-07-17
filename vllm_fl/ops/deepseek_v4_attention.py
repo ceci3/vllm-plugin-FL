@@ -282,9 +282,9 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
              )
         else:
             qr_kv, _ = self.fused_wqa_wkv(hidden_states)
-            kv_score = compressor_kv_score() if self.compressor if not None else None
-            indexer_weights = indexer_weights_proj() if self.indexer if not None else None
-            indexer_kv_score = indexer_compressor_kv_score() if self.indexer if not None else None
+            kv_score = compressor_kv_score() if self.compressor is not None else None
+            indexer_weights = indexer_weights_proj() if self.indexer is not None else None
+            indexer_kv_score = indexer_compressor_kv_score() if self.indexer is not None else None
 
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
