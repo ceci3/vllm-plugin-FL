@@ -84,6 +84,11 @@ def _patch_custom_ops():
     except (ImportError, OSError):
         pass
 
+    try:
+        import vllm_fl._C  # noqa: F401
+    except (ImportError, OSError) as e:
+        logger.debug("Failed to import vllm_fl._C: %s", e)
+
     from vllm_fl.ops._C_ops_registry import register_op_schemas
     register_op_schemas()
 
@@ -123,12 +128,16 @@ def register_router():
     # fused_moe import chain triggers cutlass_scaled_mm_supports_fp8 on MUSA
     if current_platform.device_type == "musa":
         return
+    from vllm_fl.utils import is_oot_enabled
+    if not is_oot_enabled():
+        return
     from vllm_fl.ops.fused_moe.router import replace_router_with_fl
     replace_router_with_fl()
 
 def register_model():
     """Register FL-specific models not yet upstream."""
     from vllm import ModelRegistry
+
     _register_flagcx_connector()
 
     # Register OOT quant kernels so kernel selection can find them
@@ -154,6 +163,7 @@ def register_model():
         )
     except Exception as e:
         logger.error(f"Register DeepseekV4 model error: {str(e)}")
+
 
     # Register DeepseekV4 model
     try:

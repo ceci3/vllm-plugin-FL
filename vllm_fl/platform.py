@@ -5,6 +5,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import sys
 from typing import TYPE_CHECKING, TypeVar
 from typing_extensions import ParamSpec
 
@@ -21,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.platforms import Platform, PlatformEnum
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm_fl.dispatch import CachedOp
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -34,6 +36,8 @@ from vllm_fl.utils import DeviceInfo, get_device_name, get_device_type
 
 logger = init_logger(__name__)
 
+_attention_backend = CachedOp("attention_backend")
+
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
@@ -42,6 +46,23 @@ dist_backend_dict = {
     "cuda": "nccl",
     "musa": "mccl",
 }
+
+def _resolve_flagcx_backend() -> bool:
+    """Check whether the flagcx torch distributed backend is available."""
+    flagcx_path = os.environ.get("FLAGCX_PATH")
+    if not flagcx_path:
+        return False
+    try:
+        if flagcx_path not in sys.path:
+            sys.path.insert(0, flagcx_path)
+        import plugin.torch.flagcx  # triggers _C.so load and backend registration
+        return torch.distributed.is_backend_available("flagcx")
+    except Exception:
+        logger.warning(
+            "FLAGCX_PATH=%s is set but flagcx torch backend could not be loaded.",
+            flagcx_path,
+        )
+        return False
 
 
 class PlatformFL(Platform):
@@ -61,7 +82,9 @@ class PlatformFL(Platform):
     torch_device_fn = device_info.torch_device_fn
     ray_device_key: str = "GPU"
     dist_backend: str = (
-        "flagcx" if "FLAGCX_PATH" in os.environ else dist_backend_dict.get(device_name, "nccl")
+        "flagcx"
+        if _resolve_flagcx_backend()
+        else dist_backend_dict.get(device_name, "nccl")
     )
     ### TODO(lms): dispatch device_control_env_var
     # device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
@@ -121,7 +144,7 @@ class PlatformFL(Platform):
     ### TODO(lms): change pin_memory depend device
     @classmethod
     def is_pin_memory_available(cls):
-        if cls.device_type in ["cuda", "xpu", "npu", "musa"]:
+        if cls.device_type in ["cuda", "xpu", "npu", "musa", "txda"]:
             return True
         return False
 
@@ -129,8 +152,6 @@ class PlatformFL(Platform):
     def import_kernels(cls) -> None:
         """Import device-specific kernels."""
         logger.info(f"current vendor_name is: {cls.vendor_name}")
-        # Always load base vLLM C extensions
-        super().import_kernels()
 
         if cls.vendor_name == "metax":
             try:
@@ -147,6 +168,8 @@ class PlatformFL(Platform):
                 import vllm_fl.dispatch.backends.vendor.metax.patches  # noqa: F401
             except Exception as e:
                 logger.warning(f"Failed to import maca patches: {e}")
+        else:
+            super().import_kernels()
 
         if cls.device_type == "musa":
             try:
@@ -179,6 +202,10 @@ class PlatformFL(Platform):
                 logger.info("Setting kv cache block size to 64 for MUSA.")
             else:
                 cache_config.block_size = 16
+        if cls.device_type == "npu":
+            from vllm_fl.dispatch.backends.vendor.ascend.patch import refresh_block_size
+
+            refresh_block_size(vllm_config)
 
         # TODO(lucas): handle this more gracefully
         # Note: model_config may be None during testing
@@ -251,12 +278,10 @@ class PlatformFL(Platform):
         num_heads: int | None = None,
     ) -> str:
         """Get the attention backend class path using the dispatch mechanism."""
-        from vllm_fl.dispatch import call_op
-
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
 
-        backend_path = call_op("attention_backend", use_mla=use_mla, use_sparse=use_sparse)
+        backend_path = _attention_backend(use_mla=use_mla, use_sparse=use_sparse)
 
         logger.info_once(
             "Using attention backend via dispatch (use_mla=%s, use_sparse=%s): %s",
@@ -329,7 +354,7 @@ class PlatformFL(Platform):
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
-        if cls.vendor_name in ["nvidia", "ascend", "metax", "hygon", "mthreads"]:
+        if cls.vendor_name in ["nvidia", "ascend", "metax", "hygon", "mthreads", "iluvatar", "thead"]:
             return True
         return False
 
@@ -379,10 +404,18 @@ class PlatformFL(Platform):
         if cls.device_name == "npu":
             import vllm_fl.dispatch.backends.vendor.ascend
 
+    @classmethod
     def supports_fp8(cls) -> bool:
-        if cls.vendor_name == "nvidia":
+        """Return whether the current device architecture supports FP8."""
+        if cls.vendor_name == "mthreads":
             return True
-        return False
+        if cls.vendor_name != "nvidia":
+            return False
+        try:
+            capability = cls.get_device_capability()
+        except (AttributeError, RuntimeError):
+            return False
+        return capability is not None and capability >= DeviceCapability(8, 9)
 
     @classmethod
     def get_device_uuid(cls, device_id: int = 0) -> str:
@@ -410,7 +443,7 @@ class PlatformFL(Platform):
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
-        return cls.vendor_name in ("nvidia", "thead")
+        return cls.vendor_name in ("nvidia", "thead", "iluvatar")
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
@@ -424,6 +457,9 @@ class PlatformFL(Platform):
             return None
         if cls.device_type == "musa":
             major, minor = torch.musa.get_device_capability(device_id)
+            return DeviceCapability(major=major, minor=minor)
+        if cls.device_type == "txda":
+            major, minor = torch.txda.get_device_capability(device_id)
             return DeviceCapability(major=major, minor=minor)
         # TODO: For PTPU/Sunrise devices, return None
         if cls.device_type == "ptpu":
