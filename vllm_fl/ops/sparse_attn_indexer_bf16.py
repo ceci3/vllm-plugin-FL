@@ -3,6 +3,7 @@
 """Custom Sparse Attention Indexer layers."""
 
 import torch
+from flag_gems.fused import bf16_paged_mqa_logits
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -10,13 +11,15 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import (
-    bf16_paged_mqa_logits,
-    has_deep_gemm,
-)
-from vllm.v1.attention.ops.deepseek_v4_ops.bf16_mqa_logits import (
-    gather_bf16_kv_from_pages,
-)
+from vllm.utils.deep_gemm import has_deep_gemm
+try:
+    from vllm.v1.attention.ops.deepseek_v4_ops.bf16_mqa_logits import (
+        gather_bf16_kv_from_pages,
+    )
+except ModuleNotFoundError:
+    from vllm_fl.dispatch.backends.vendor.cuda.impl.deepseek_v4_ops.mqa_logits import (
+        gather_bf16_kv_from_pages,
+    )
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -273,19 +276,21 @@ def sparse_attn_indexer_bf16(
             q_slice = q_quant[chunk.token_start : chunk.token_end]
             w_slice = weights[chunk.token_start : chunk.token_end]
             num_tokens = q_slice.shape[0]
+            schedule_metadata = getattr(chunk, "schedule_metadata", None)
+            query_token_to_req = getattr(chunk, "query_token_to_req", None)
 
             if (
                 current_platform.is_cuda()
                 and has_deep_gemm()
-                and chunk.schedule_metadata is not None
-                and chunk.query_token_to_req is not None
+                and schedule_metadata is not None
+                and query_token_to_req is not None
             ):
                 # Paged path: directly compute logits on paged KV cache
                 # without gather. ~3-11x faster than gather + non-paged.
 
                 # Expand per-request block_table to per-token
                 per_token_block_table = chunk.block_table[
-                    chunk.query_token_to_req
+                    query_token_to_req
                 ]
 
                 # Per-token context lens [num_tokens, 1] for DeepGEMM
@@ -302,7 +307,7 @@ def sparse_attn_indexer_bf16(
                     w_slice,
                     per_token_ctx_lens,
                     per_token_block_table,
-                    chunk.schedule_metadata,
+                    schedule_metadata,
                     max_model_len=int(per_token_ctx_lens.max().item()),
                     clean_logits=False,
                 )

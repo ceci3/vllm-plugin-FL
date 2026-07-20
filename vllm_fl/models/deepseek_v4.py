@@ -48,7 +48,6 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -65,7 +64,7 @@ from vllm_fl.ops.deepseek_v4_attention import (
 )
  
 
-_DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
+_DEEPSEEK_V4_EXPERT_DTYPES = ("bf16", "fp4", "fp8")
 
 class WOAColumnParallelLinear(ColumnParallelLinear):
     def __init__(self,
@@ -214,7 +213,7 @@ class DeepseekV4FP8Config(Fp8Config):
     def is_scale_e8m0(self) -> bool:
         # FP4 checkpoints store FP8 linear scales as e8m0fnu; FP8 expert
         # checkpoints (Flash-Base) store them as float32.
-        return self.expert_dtype == "fp4"
+        return self.expert_dtype in ("bf16", "fp4")
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -244,6 +243,8 @@ class DeepseekV4FP8Config(Fp8Config):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.expert_dtype == "fp4":
                 return Mxfp4MoEMethod(layer.moe_config)
+            if self.expert_dtype == "bf16":
+                return UnquantizedFusedMoEMethod(layer.moe_config)
             # expert_dtype == "fp8": fall through to Fp8Config which
             # returns Fp8MoEMethod with block-wise float32 scales.
         return super().get_quant_method(layer, prefix)
@@ -705,46 +706,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
 
 DeepseekV4MegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
-
-
-def _deepseek_v4_mega_moe_experts_op(
-    hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    out: torch.Tensor,
-    layer_name: str,
-    activation_clamp: float | None,
-    fast_math: bool,
-) -> None:
-    self = get_forward_context().no_compile_layers[layer_name]
-    self._run_mega_moe(
-        hidden_states,
-        topk_weights,
-        topk_ids,
-        out,
-        activation_clamp,
-        fast_math,
-    )
-
-
-def _deepseek_v4_mega_moe_experts_op_fake(
-    hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    out: torch.Tensor,
-    layer_name: str,
-    activation_clamp: float | None,
-    fast_math: bool,
-) -> None:
-    return None
-
-
-direct_register_custom_op(
-    op_name="deepseek_v4_mega_moe_experts",
-    op_func=_deepseek_v4_mega_moe_experts_op,
-    mutates_args=["out"],
-    fake_impl=_deepseek_v4_mega_moe_experts_op_fake,
-)
 
 
 class DeepseekV4MoE(nn.Module):
@@ -1421,6 +1382,10 @@ class DeepseekV4Model(nn.Module):
         expert_mapping = self.get_expert_mapping()
 
         for name, loaded_weight in weights:
+            if name.startswith("layers."):
+                layer_idx = int(name.split(".", 2)[1])
+                if not self.start_layer <= layer_idx < self.end_layer:
+                    continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if ".experts." in name:
@@ -1429,6 +1394,10 @@ class DeepseekV4Model(nn.Module):
                     continue
                 name = name.replace(weight_name, param_name)
 
+                if name not in params_dict:
+                    # The checkpoint may include a stacked compressor tensor
+                    # for a layer that does not instantiate a compressor.
+                    break
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -1457,18 +1426,31 @@ class DeepseekV4Model(nn.Module):
                         weight_loader = typing.cast(
                             Callable[..., bool], param.weight_loader
                         )
-                        success = weight_loader(
-                            param,
-                            loaded_weight,
-                            name_mapped,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
-                            return_success=True,
-                        )
+                        try:
+                            success = weight_loader(
+                                param,
+                                loaded_weight,
+                                name_mapped,
+                                shard_id=shard_id,
+                                expert_id=expert_id,
+                                return_success=True,
+                            )
+                        except RuntimeError as exc:
+                            raise RuntimeError(
+                                "Failed loading expert weight "
+                                f"{name!r} -> {name_mapped!r}, shard={shard_id!r}, "
+                                f"expert={expert_id}, source_shape={tuple(loaded_weight.shape)}, "
+                                f"param_shape={tuple(param.shape)}"
+                            ) from exc
                         if success:
                             name = name_mapped
                             break
                     loaded_params.add(name_mapped)
+                    continue
+                elif name not in params_dict:
+                    # Checkpoints may contain routing/compressor metadata for
+                    # layers whose selected runtime implementation does not
+                    # instantiate the corresponding parameter.
                     continue
                 elif "attn_sink" in name:
                     narrow_weight = loaded_weight[head_rank_start:head_rank_end]

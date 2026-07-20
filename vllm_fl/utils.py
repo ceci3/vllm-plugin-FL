@@ -5,7 +5,11 @@ import os
 from typing import Optional, Tuple
 
 import flag_gems
-from flag_gems.runtime.backend.device import DeviceDetector
+try:
+    from flag_gems.runtime.backend.device_finder import DeviceDetector
+except ImportError:
+    # Compatibility with older FlagGems releases before device.py was renamed.
+    from flag_gems.runtime.backend.device import DeviceDetector
 from flag_gems.runtime import backend
 
 _OP_CONFIG: Optional[dict[str, str]] = None

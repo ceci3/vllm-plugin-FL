@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from flag_gems.fused import fused_deepseek_v4_qnorm_rope_kv_rope_insert
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm.envs as envs
@@ -20,7 +21,6 @@ from vllm.model_executor.layers.linear import (
 
 from vllm.model_executor.layers.utils import cublas_gemm_bf16_bf16_fp32
 from vllm.model_executor.utils import replace_parameter
-from vllm.utils.deep_gemm import fp8_einsum
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.deepseek_v4_ops import (
     combine_topk_swa_indices,
@@ -524,7 +524,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(PluggableLayer):
         #   Q side:  q_head_norm (per-head RMSNorm, no weight) + GPT-J RoPE
         #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert
         # kv is unchanged; mla_attn reads kv solely via swa_kv_cache.
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_insert(
+        fused_deepseek_v4_qnorm_rope_kv_rope_insert(
             q,
             kv,
             swa_kv_cache,
@@ -561,38 +561,6 @@ direct_register_custom_op(
     op_func=deepseek_v4_attention_fl,
     mutates_args=["out"],
     fake_impl=deepseek_v4_attention_fl_fake,
-)
-
-
-def deepseek_v4_fp8_einsum(
-    a: torch.Tensor,
-    a_scale: torch.Tensor,
-    b: torch.Tensor,
-    b_scale: torch.Tensor,
-    out: torch.Tensor,
-    equation: str,
-    recipe: list[int],
-) -> None:
-    fp8_einsum(equation, (a, a_scale), (b, b_scale), out, recipe=tuple(recipe))
-
-
-def deepseek_v4_fp8_einsum_fake(
-    a: torch.Tensor,
-    a_scale: torch.Tensor,
-    b: torch.Tensor,
-    b_scale: torch.Tensor,
-    out: torch.Tensor,
-    equation: str,
-    recipe: list[int],
-) -> None:
-    return None
-
-
-direct_register_custom_op(
-    op_name="deepseek_v4_fp8_einsum",
-    op_func=deepseek_v4_fp8_einsum,
-    mutates_args=["out"],
-    fake_impl=deepseek_v4_fp8_einsum_fake,
 )
 
 
@@ -718,10 +686,18 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
-            dtype=torch.bfloat16 if self.kv_cache_dtype == "bf16" else torch.uint8,
+            dtype=(
+                torch.bfloat16
+                if self.kv_cache_dtype in ("bf16", "bfloat16")
+                else torch.uint8
+            ),
             compress_ratio=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
-            alignment=self.head_dim * get_dtype_size(torch.bfloat16) if self.kv_cache_dtype == "bf16" else 576,  # NOTE: FP8 FlashMLA requires 576B alignment
+            alignment=(
+                self.head_dim * get_dtype_size(torch.bfloat16)
+                if self.kv_cache_dtype in ("bf16", "bfloat16")
+                else 576
+            ),  # NOTE: FP8 FlashMLA requires 576B alignment
             model_version="deepseek_v4",
         )
 

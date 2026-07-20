@@ -1,6 +1,9 @@
 # =============================================================================
 # Indexer path (head=128, all BF16)
 # =============================================================================
+from vllm.triton_utils import tl, triton
+
+
 @triton.jit
 def _fused_kv_compress_norm_rope_insert_indexer_attn_bf16(
     # ── state cache (compressor internal state) ──
@@ -288,4 +291,3 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn_bf16(
     # ------------------------------------------------------------------
     out_ptr = token_ptr.to(tl.pointer_type(tl.bfloat16))
     tl.store(out_ptr + block, result.to(tl.bfloat16), mask=mask)
-

@@ -352,6 +352,14 @@ class DeepseekCompressor(nn.Module):
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
         kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
 
+        quant_kwargs = {}
+        if self._scale_dim is not None:
+            quant_kwargs = {
+                "FP8_MAX": 448.0,
+                "QUANT_BLOCK": self._quant_block,
+                "SCALE_DIM": self._scale_dim,
+            }
+
         self._fused_kernel[(num_actual,)](
             # state cache
             state_cache,
@@ -381,13 +389,11 @@ class DeepseekCompressor(nn.Module):
             COMPRESS_RATIO=self.compress_ratio,
             OVERLAP=self.overlap,
             ROPE_HEAD_DIM=self.rope_head_dim,
-            FP8_MAX=448.0,
-            QUANT_BLOCK=self._quant_block,
             TOKEN_STRIDE=self._token_stride,
-            SCALE_DIM=self._scale_dim,
             KV_BLOCK_STRIDE=kv_cache.stride(0),
             num_warps=self._num_warps,
             launch_pdl=False,
+            **quant_kwargs,
         )
 
 
