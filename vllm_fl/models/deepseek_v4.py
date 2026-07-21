@@ -1541,10 +1541,6 @@ class DeepseekV4Model(nn.Module):
         expert_mapping = self.get_expert_mapping()
 
         for name, loaded_weight in weights:
-            if name.startswith("layers."):
-                layer_idx = int(name.split(".", 2)[1])
-                if not self.start_layer <= layer_idx < self.end_layer:
-                    continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if ".experts." in name:
@@ -1553,10 +1549,6 @@ class DeepseekV4Model(nn.Module):
                     continue
                 name = name.replace(weight_name, param_name)
 
-                if name not in params_dict:
-                    # A checkpoint can contain a stacked compressor tensor for
-                    # a layer whose selected attention path has no compressor.
-                    break
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -1606,10 +1598,6 @@ class DeepseekV4Model(nn.Module):
                             name = name_mapped
                             break
                     loaded_params.add(name_mapped)
-                    continue
-                elif name not in params_dict:
-                    # Optional routing/compressor state can be absent from the
-                    # selected FP8 or BF16 runtime implementation.
                     continue
                 elif "attn_sink" in name:
                     narrow_weight = loaded_weight[head_rank_start:head_rank_end]
