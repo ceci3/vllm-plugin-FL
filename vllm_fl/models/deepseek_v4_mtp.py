@@ -38,12 +38,12 @@ from vllm.sequence import IntermediateTensors
 
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
-from vllm.model_executor.models.utils import maybe_prefix
 from .deepseek_v4 import (
     DeepseekV4DecoderLayer,
     hc_head,
     make_deepseek_v4_expert_params_mapping,
 )
+from vllm.model_executor.models.utils import maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -342,31 +342,7 @@ class DeepSeekV4MTP(nn.Module):
             else ".weight_scale_inv"
         )
 
-        # Map top-level shared weight names to MTP model parameter paths.
-        # In BF16 checkpoints, embed_tokens and lm_head are stored at the
-        # top level (e.g. "embed.weight", "head.weight") rather than under
-        # the mtp.{i}.* prefix.  We load them into the MTP model's shared
-        # parameters directly.
-        SHARED_WEIGHT_MAP: dict[str, str] = {
-            "embed.weight": "model.embed_tokens.weight",
-            "head.weight": f"model.layers."
-            f"{self.config.num_hidden_layers}.shared_head.head.weight",
-        }
-
         for name, loaded_weight in weights:
-            # Handle top-level shared weights (embed / lm_head) that are
-            # not stored under the mtp.{i} prefix in the checkpoint.
-            if name in SHARED_WEIGHT_MAP:
-                target_name = SHARED_WEIGHT_MAP[name]
-                if target_name in params_dict and target_name not in loaded_params:
-                    param = params_dict[target_name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add(target_name)
-                continue
-
             mtp_layer_idx = _find_mtp_layer_idx(name)
             # V4 checkpoints store MTP weights as `mtp.{i}.*`; remap to
             # `model.layers.{num_hidden_layers + i}.*` so that

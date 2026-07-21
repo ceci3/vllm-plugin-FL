@@ -11,31 +11,25 @@ from typing import TYPE_CHECKING, Any, cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from flag_gems.fused import fused_deepseek_v4_qnorm_rope_kv_rope_insert
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm.envs as envs
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
-from vllm_fl.ops.sparse_attn_indexer import SparseAttnIndexer
-from vllm.model_executor.layers.utils import cublas_gemm_bf16_bf16_fp32
-from vllm_fl.dispatch import CachedOp
 
-_fused_inv_rope_fp8_quant = CachedOp("fused_inv_rope_fp8_quant")
-_deepseek_v4_fp8_einsum = CachedOp("deepseek_v4_fp8_einsum")
-_fused_q_kv_rmsnorm = CachedOp("fused_q_kv_rmsnorm")
-_fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert = CachedOp(
-    "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert"
-)
-_compute_global_topk_indices_and_lens = CachedOp(
-    "compute_global_topk_indices_and_lens"
-)
-_flash_mla_with_kvcache = CachedOp("flash_mla_with_kvcache")
-_dequantize_and_gather_k_cache = CachedOp("dequantize_and_gather_k_cache")
-_combine_topk_swa_indices = CachedOp("combine_topk_swa_indices")
-_flash_mla_sparse_fwd = CachedOp("flash_mla_sparse_fwd")
-_fused_indexer_q_rope_quant = CachedOp("fused_indexer_q_rope_quant")
+from vllm.model_executor.layers.utils import cublas_gemm_bf16_bf16_fp32
+from vllm.model_executor.utils import replace_parameter
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.ops.deepseek_v4_ops import (
+    combine_topk_swa_indices,
+    compute_global_topk_indices_and_lens,
+    dequantize_and_gather_k_cache,
+    fused_indexer_q_rope_quant,
+    fused_inv_rope_fp8_quant,
+    fused_q_kv_rmsnorm,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -47,12 +41,36 @@ from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
 )
+
+
+def _inverse_rope_bf16(
+    o: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    n_groups: int,
+    heads_per_group: int,
+    nope_dim: int,
+    rope_dim: int,
+) -> torch.Tensor:
+    """Apply inverse interleaved RoPE and restore the grouped BMM layout."""
+    rope = o[..., nope_dim:].float()
+    cos_sin = cos_sin_cache[positions]
+    half_rope = rope_dim // 2
+    cos = cos_sin[..., :half_rope].unsqueeze(1)
+    sin = cos_sin[..., half_rope:].unsqueeze(1)
+    even = rope[..., 0::2]
+    odd = rope[..., 1::2]
+    rotated = torch.stack(
+        (even * cos + odd * sin, odd * cos - even * sin), dim=-1
+    ).flatten(-2)
+    result = torch.cat((o[..., :nope_dim].float(), rotated), dim=-1)
+    return result.to(o.dtype).view(o.size(0), n_groups, -1)
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.deepseek_compressor import DeepseekCompressor
-from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.input_quant_fp8 import (
     QuantFP8,
@@ -61,12 +79,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
 from vllm.utils.multi_stream_utils import (
+    execute_in_parallel,
     maybe_execute_in_parallel,
 )
-try:
-    from vllm.utils.multi_stream_utils import execute_in_parallel
-except:
-    execute_in_parallel = None
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     DeepseekV4FlashMLASparseBackend,
@@ -78,19 +93,51 @@ from vllm.v1.attention.backends.mla.indexer import (
     get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.attention.ops.flashmla import (
+    flash_mla_sparse_fwd,
+    flash_mla_with_kvcache,
+)
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
-from vllm.model_executor.layers.deepseek_v4_attention import (
-    DeepseekV4MultiHeadLatentAttentionWrapper,
-    DeepseekV4MLAModules,
-    PREFILL_CHUNK_SIZE,
-    )
+from vllm.utils.torch_utils import get_dtype_size
+from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from .deepseek_compressor import DeepseekCompressor
+from .sparse_attn_indexer_bf16 import SparseAttnIndexerBF16
+from vllm_fl.dispatch import CachedOp
+
+_gather_k_cache = CachedOp("gather_k_cache")
+_fused_indexer_q_rope = CachedOp("fused_indexer_q_rope")
 
 logger = init_logger(__name__)
 
+# Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
+# workspace allocated at _forward_prefill (and the matching profile-time
+# reservation in attention_impl's dummy-run branch).
+PREFILL_CHUNK_SIZE = 4
+
+
+@dataclass
+class DeepseekV4MLAModules:
+    """Modules used in DeepseekV4 MLA."""
+
+    vllm_config: VllmConfig
+    fused_wqa_wkv: torch.nn.Module
+    q_norm: torch.nn.Module
+    wq_b: torch.nn.Module
+    kv_norm: torch.nn.Module
+    wo_a: torch.nn.Module
+    wo_b: torch.nn.Module
+    attn_sink: torch.nn.Module
+    rotary_emb: torch.nn.Module
+    indexer: torch.nn.Module | None
+    indexer_rotary_emb: torch.nn.Module
+    topk_indices_buffer: torch.Tensor | None
+    aux_stream_list: list[torch.cuda.Stream] | None = None
+
 
 # --8<-- [start:multi_head_latent_attention]
-class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAttentionWrapper):
+@PluggableLayer.register("deepseek_v4_multi_head_latent_attention_bf16_fl")
+class DeepseekV4MultiHeadLatentAttentionBF16Wrapper(PluggableLayer):
     """Pluggable MLA layer which allows OOT backends to add
     custom implementations of the outer MLA layer (including rope & o_proj).
     Note that currently oot platforms can still use CustomOp.register_oot to
@@ -128,18 +175,108 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(hidden_size, num_heads, head_dim, scale, qk_nope_head_dim, 
-                         qk_rope_head_dim, v_head_dim, q_lora_rank, kv_lora_rank, o_lora_rank,
-                         mla_modules, window_size, compress_ratio, cache_config, quant_config,
-                         prefix)
-        # TODO(yifan): currently hardcoded for FP8 sparse, make it more generic
-        head_bytes = (
-            self.nope_head_dim  # 448 fp8 NoPE
-            + self.rope_head_dim * 2  # 64 bf16 RoPE
-            + self.nope_head_dim // 64  # 7B scale factors
-            + 1  # 1B pad
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.n_local_heads = num_heads
+        self.head_dim = head_dim
+        self.scale = scale
+
+        # FlashMLA sparse kernel only supports 64 or 128 heads; pad up to the
+        # next supported size. Must match DeepseekV4MLAAttention.padded_heads.
+        if num_heads <= 64:
+            self.padded_heads = 64
+        elif num_heads <= 128:
+            self.padded_heads = 128
+        else:
+            raise ValueError(
+                f"DeepseekV4 attention does not support {num_heads} heads "
+                "(must be <= 128)."
+            )
+
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+        self.window_size = window_size
+        self.compress_ratio = compress_ratio if compress_ratio is not None else 1
+        self.prefix = prefix
+
+        # Extract config from vllm_config
+        config = mla_modules.vllm_config.model_config.hf_config
+        tp_size = get_tensor_model_parallel_world_size()
+
+        # DeepseekV4-specific attributes (num_heads is already TP-adjusted)
+        self.eps = config.rms_norm_eps
+        self.rope_head_dim = config.qk_rope_head_dim
+        self.nope_head_dim = head_dim - self.rope_head_dim
+        self.n_local_groups = config.o_groups // tp_size
+        self.o_lora_rank = config.o_lora_rank
+
+        # Store projection modules
+        self.fused_wqa_wkv = mla_modules.fused_wqa_wkv
+        self.q_norm = mla_modules.q_norm
+        self.wq_b = mla_modules.wq_b
+
+        self.kv_norm = mla_modules.kv_norm
+        self.wo_a = mla_modules.wo_a
+        # Reshape deferred to process_weights_after_loading (after weight load)
+        self._wo_a_needs_reshape = getattr(self.wo_a, "is_bmm", False)
+
+        if quant_config is not None:
+            self._wo_a_act_quant = QuantFP8(
+                static=False,
+                group_shape=GroupShape(1, 128),
+                use_ue8m0=True,
+            )
+            self._wo_a_act_quant.use_deep_gemm_supported = False
+        else:
+            self._wo_a_act_quant = None
+        # Bypass packed-for-deepgemm path — we need FP32 scales (not packed
+        # INT32) so fp8_einsum can handle layout transform internally.
+        self.wo_b = mla_modules.wo_b
+
+        # Pick fp8_einsum recipe based on GPU arch:
+        # SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128
+        # SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1
+        from vllm.platforms import current_platform
+
+        cap = current_platform.get_device_capability()
+        assert cap is not None, "DeepseekV4 attention requires a CUDA device"
+        self._einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
+        self._tma_aligned_scales = cap.major >= 10
+
+        self.rotary_emb = mla_modules.rotary_emb
+        self.indexer_rotary_emb = mla_modules.indexer_rotary_emb
+        self.topk_indices_buffer = mla_modules.topk_indices_buffer
+
+        self.indexer = mla_modules.indexer
+
+        # Per-head RMS normalization for Q (no learnable weights)
+        self.q_head_norm = RMSNorm(head_dim, eps=self.eps, has_weight=False)
+
+        # TODO(lms): compatible with fp8 sparse attention
+        if quant_config is not None:
+            head_bytes = (
+                self.nope_head_dim  # 448 fp8 NoPE
+                + self.rope_head_dim * 2  # 64 bf16 RoPE
+                + self.nope_head_dim // 64  # 7B scale factors
+                + 1  # 1B pad
+            )
+        else:
+            head_bytes = self.head_dim * get_dtype_size(torch.bfloat16)
+
+        self.aux_stream_list = mla_modules.aux_stream_list
+        # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
+        # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
+        # before post-GEMM starts.
+        self.ln_events = [torch.cuda.Event() for _ in range(4)]
+
+        assert cache_config is not None, "DeepseekV4 attention requires cache_config"
+        self.swa_cache_layer = DeepseekV4SWACache(
+            head_dim=self.head_dim,
+            window_size=self.window_size,
+            dtype=torch.bfloat16 if quant_config is None else torch.uint8,
+            prefix=f"{prefix}.swa_cache",
+            cache_config=cache_config,
         )
-        del self.mla_attn
 
         self.mla_attn = DeepseekV4MLAAttention(
             num_heads=self.n_local_heads,
@@ -165,10 +302,23 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
         compilation_config = mla_modules.vllm_config.compilation_config
         # HACK
         self.layer_name = prefix + ".deepseek_v4_multi_head_latent_attention"
-        compilation_config.static_forward_context.pop(self.layer_name)
         if self.layer_name in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         compilation_config.static_forward_context[self.layer_name] = self
+
+        # Create the compressor for layers with compress_ratio > 1; after
+        # creating the DeepseekV4MLAAttention layer to get its cache.
+        self.compressor = None
+        if self.compress_ratio > 1:
+            self.compressor = DeepseekCompressor(
+                vllm_config=mla_modules.vllm_config,
+                compress_ratio=self.compress_ratio,
+                hidden_size=self.hidden_size,
+                head_dim=self.head_dim,
+                rotate=True,
+                prefix=f"{prefix}.compressor",
+                k_cache_prefix=self.mla_attn.prefix,
+            )
 
     def forward(
         self,
@@ -186,7 +336,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
         )
 
         # Attention (inside custom op for torch.compile boundary)
-        torch.ops.vllm.deepseek_v4_attention_fl(
+        torch.ops.vllm.deepseek_v4_attention_bf16_fl(
             hidden_states,
             positions,
             o_padded,
@@ -194,8 +344,8 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
         )
         o = o_padded[:, : self.n_local_heads, :]
 
-        # O projection: inverse RoPE + FP8 quant + einsum + wo_b
-        o_fp8, o_scale = _fused_inv_rope_fp8_quant(
+        # O projection: inverse RoPE + einsum + wo_b
+        o_bf16 = _inverse_rope_bf16(
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
@@ -203,26 +353,14 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
             rope_dim=self.rope_head_dim,
-            tma_aligned_scales=self._tma_aligned_scales,
         )
 
-        wo_a_fp8 = self.wo_a.weight
-        wo_a_scale = self.wo_a.weight_scale_inv
+        wo_a = self.wo_a.weight
 
-        z = torch.empty(
-            (num_tokens, self.n_local_groups, self.o_lora_rank),
-            device=o.device,
-            dtype=torch.bfloat16,
-        )
-
-        _deepseek_v4_fp8_einsum(
-            o_fp8,
-            o_scale,
-            wo_a_fp8,
-            wo_a_scale,
-            z,
+        z = torch.einsum(
             "bhr,hdr->bhd",
-            list(self._einsum_recipe),
+            o_bf16,
+            wo_a,
         )
 
         return self.wo_b(z.flatten(1))
@@ -268,21 +406,15 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
             qr_kv, _ = self.fused_wqa_wkv(hidden_states)
             return qr_kv
 
-        if execute_in_parallel:
-             qr_kv, (kv_score, indexer_weights, indexer_kv_score) = execute_in_parallel(
-                 fused_wqa_wkv,
-                 aux_fns,
-                 self.ln_events[0],
-                 self.ln_events[1:4],
-                 self.aux_stream_list[:3],
-                 enable=hidden_states.shape[0]
-                 <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD,
-             )
-        else:
-            qr_kv, _ = self.fused_wqa_wkv(hidden_states)
-            kv_score = compressor_kv_score() if self.compressor is not None else None
-            indexer_weights = indexer_weights_proj() if self.indexer is not None else None
-            indexer_kv_score = indexer_compressor_kv_score() if self.indexer is not None else None
+        qr_kv, (kv_score, indexer_weights, indexer_kv_score) = execute_in_parallel(
+            fused_wqa_wkv,
+            aux_fns,
+            self.ln_events[0],
+            self.ln_events[1:4],
+            self.aux_stream_list[:3],
+            enable=hidden_states.shape[0]
+            <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD,
+        )
 
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
@@ -300,7 +432,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
         )
 
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
-        qr, kv = _fused_q_kv_rmsnorm(
+        qr, kv = fused_q_kv_rmsnorm(
             qr,
             kv,
             self.q_norm.weight.data,
@@ -410,16 +542,18 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
         assert swa_metadata is not None
 
         swa_kv_cache = self.swa_cache_layer.kv_cache
-        swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
+        ### NOTE(lms): fp8 need view
+        # swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
+        # print(f"swa_kv_cache_2d: {swa_kv_cache}, shape: {swa_kv_cache.shape}")
 
         # Horizontally fused:
         #   Q side:  q_head_norm (per-head RMSNorm, no weight) + GPT-J RoPE
         #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert
         # kv is unchanged; mla_attn reads kv solely via swa_kv_cache.
-        _fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+        fused_deepseek_v4_qnorm_rope_kv_rope_insert(
             q,
             kv,
-            swa_kv_cache_2d,
+            swa_kv_cache,
             swa_metadata.slot_mapping,
             positions.to(torch.int64),
             self.rotary_emb.cos_sin_cache,
@@ -428,7 +562,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
         )
 
 
-def deepseek_v4_attention_fl(
+def deepseek_v4_attention_bf16_fl(
     hidden_states: torch.Tensor,
     positions: torch.Tensor,
     out: torch.Tensor,
@@ -439,7 +573,7 @@ def deepseek_v4_attention_fl(
     self.attention_impl(hidden_states, positions, out)
 
 
-def deepseek_v4_attention_fl_fake(
+def deepseek_v4_attention_bf16_fl_fake(
     hidden_states: torch.Tensor,
     positions: torch.Tensor,
     out: torch.Tensor,
@@ -449,11 +583,12 @@ def deepseek_v4_attention_fl_fake(
 
 
 direct_register_custom_op(
-    op_name="deepseek_v4_attention_fl",
-    op_func=deepseek_v4_attention_fl,
+    op_name="deepseek_v4_attention_bf16_fl",
+    op_func=deepseek_v4_attention_bf16_fl,
     mutates_args=["out"],
-    fake_impl=deepseek_v4_attention_fl_fake,
+    fake_impl=deepseek_v4_attention_bf16_fl_fake,
 )
+
 
 class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
     # FlashMLA FP8 sparse only supports 64 or 128 heads
@@ -529,13 +664,15 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.max_model_len = vllm_config.model_config.max_model_len
-        # DeepseekV4 only supports fp8 kv-cache format for now
-        kv_cache_dtype = cache_config.cache_dtype if cache_config is not None else "fp8"
 
-        assert kv_cache_dtype.startswith("fp8"), (
-            f"DeepseekV4 only supports fp8 kv-cache format for now, "
-            f"got {kv_cache_dtype}"
-        )
+        if cache_config is not None and cache_config.cache_dtype != "auto":
+            kv_cache_dtype = cache_config.cache_dtype
+        else:
+            if quant_config is not None:
+                kv_cache_dtype = "fp8"
+            else:
+                kv_cache_dtype = "bf16"
+
         assert issubclass(self.get_attn_backend(), FlashMLASparseBackend), (
             "Only FlashMLA Sparse Attention backend is supported for DeepseekV4 for now"
         )
@@ -552,10 +689,10 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             logger.info_once("Using DeepSeek's fp8_ds_mla KV cache format.")
 
         self.kv_cache_dtype = kv_cache_dtype
+        logger.info_once(f"Using DeepSeek's {self.kv_cache_dtype} KV cache format.")
 
         # Register with compilation context for metadata lookup
         compilation_config = vllm_config.compilation_config
-        compilation_config.static_forward_context.pop(prefix)
         if prefix and prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         if prefix:
@@ -575,10 +712,18 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
-            dtype=torch.uint8,
+            dtype=(
+                torch.bfloat16
+                if self.kv_cache_dtype in ("bf16", "bfloat16")
+                else torch.uint8
+            ),
             compress_ratio=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
-            alignment=576,  # NOTE: FlashMLA requires 576B alignment
+            alignment=(
+                self.head_dim * get_dtype_size(torch.bfloat16)
+                if self.kv_cache_dtype in ("bf16", "bfloat16")
+                else 576
+            ),  # NOTE: FP8 FlashMLA requires 576B alignment
             model_version="deepseek_v4",
         )
 
@@ -662,7 +807,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             if self.compress_ratio == 4:
                 # C4A: local indices differ per layer (filled by Indexer).
                 assert self.topk_indices_buffer is not None
-                global_indices, topk_lens = _compute_global_topk_indices_and_lens(
+                global_indices, topk_lens = compute_global_topk_indices_and_lens(
                     self.topk_indices_buffer[:num_decode_tokens],
                     swa_metadata.token_to_req_indices,
                     attn_metadata.block_table[:num_decodes],
@@ -714,14 +859,14 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             "allocate one for this layer type."
         )
 
-        out, _ = _flash_mla_with_kvcache(
+        out, _ = flash_mla_with_kvcache(
             q=q,
             k_cache=swa_cache,
             block_table=None,
             head_dim_v=512,
             tile_scheduler_metadata=tile_metadata,
             cache_seqlens=None,
-            is_fp8_kvcache=True,
+            is_fp8_kvcache=False, #True,
             indices=swa_indices,
             topk_length=swa_lens,
             softmax_scale=self.scale,
@@ -798,27 +943,49 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 # Gather compressed KV
                 assert attn_metadata is not None
                 block_table = attn_metadata.block_table[num_decodes:]
-                _dequantize_and_gather_k_cache(
-                    kv[:chunk_size],
-                    compressed_k_cache,
-                    seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
-                    gather_lens=None,
-                    block_table=block_table[chunk_start:chunk_end],
-                    block_size=attn_metadata.block_size // self.compress_ratio,
-                    offset=0,
-                )
+                if self.kv_cache_dtype == "fp8_ds_mla":
+                    dequantize_and_gather_k_cache(
+                        kv[:chunk_size],
+                        compressed_k_cache,
+                        seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
+                        gather_lens=None,
+                        block_table=block_table[chunk_start:chunk_end],
+                        block_size=attn_metadata.block_size // self.compress_ratio,
+                        offset=0,
+                    )
+                else:
+                    _gather_k_cache(
+                        kv[:chunk_size],
+                        compressed_k_cache,
+                        seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
+                        gather_lens=None,
+                        block_table=block_table[chunk_start:chunk_end],
+                        block_size=attn_metadata.block_size // self.compress_ratio,
+                        offset=0,
+                    )
 
             # Gather SWA KV
             swa_block_table = swa_metadata.block_table[num_decodes:]
-            _dequantize_and_gather_k_cache(
-                kv[:chunk_size],
-                swa_k_cache,
-                seq_lens=seq_lens[chunk_start:chunk_end],
-                gather_lens=gather_lens[chunk_start:chunk_end],
-                block_table=swa_block_table[chunk_start:chunk_end],
-                block_size=swa_metadata.block_size,
-                offset=N,
-            )
+            if self.kv_cache_dtype == "fp8_ds_mla":
+                dequantize_and_gather_k_cache(
+                    kv[:chunk_size],
+                    swa_k_cache,
+                    seq_lens=seq_lens[chunk_start:chunk_end],
+                    gather_lens=gather_lens[chunk_start:chunk_end],
+                    block_table=swa_block_table[chunk_start:chunk_end],
+                    block_size=swa_metadata.block_size,
+                    offset=N,
+                )
+            else:
+                _gather_k_cache(
+                    kv[:chunk_size],
+                    swa_k_cache,
+                    seq_lens=seq_lens[chunk_start:chunk_end],
+                    gather_lens=gather_lens[chunk_start:chunk_end],
+                    block_table=swa_block_table[chunk_start:chunk_end],
+                    block_size=swa_metadata.block_size,
+                    offset=N,
+                )
 
             # Combine the topk indices and SWA indices for gathered KV cache
             query_start = (
@@ -828,7 +995,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
             )
 
-            combined_indices, combined_lens = _combine_topk_swa_indices(
+            combined_indices, combined_lens = combine_topk_swa_indices(
                 topk_indices[query_start:query_end],
                 query_start_loc[
                     num_decodes + chunk_start : num_decodes + chunk_end + 1
@@ -841,7 +1008,8 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 M,
                 N,
             )
-            output_chunk, _, _ = _flash_mla_sparse_fwd(
+
+            output_chunk, _, _ = flash_mla_sparse_fwd(
                 q=q[query_start:query_end],
                 kv=kv.view(-1, 1, q.shape[-1]),
                 indices=combined_indices.unsqueeze(1),
@@ -918,10 +1086,12 @@ class DeepseekV4Indexer(nn.Module):
         self.q_lora_rank = q_lora_rank  # 1536
         self.compress_ratio = compress_ratio
         self.use_fp4_kv = self.vllm_config.attention_config.use_fp4_indexer_cache
-        logger.info_once(
-            "Using %s indexer cache for Lighening Indexer.",
-            "MXFP4" if self.use_fp4_kv else "FP8",
-        )
+        if self.use_fp4_kv and self.quant_config is not None:
+            logger.info_once("Using MXFP4 indexer cache for Lighening Indexer.")
+        elif self.quant_config is not None:
+            logger.info_once("Using FP8 indexer cache for Lighening Indexer.")
+        else:
+            logger.info_once("Using BF16 indexer cache for Lighening Indexer.")
 
         # no tensor parallel, just replicated
         self.wq_b = ReplicatedLinear(
@@ -938,7 +1108,6 @@ class DeepseekV4Indexer(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.weights_proj",
         )
-        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
         self.softmax_scale = self.head_dim**-0.5
 
         self.scale_fmt = "ue8m0"
@@ -959,10 +1128,11 @@ class DeepseekV4Indexer(nn.Module):
         # head_dim bytes = 128 fp8 + 4 fp32 scale = 132.
         # For FP4 indexer cache, we still allocate the same amount of memory as FP8,
         # but only use the first half of the memory.
-        k_cache_head_dim = self.head_dim + self.head_dim // self.quant_block_size * 4
+        k_cache_head_dim = self.head_dim if quant_config is None else self.head_dim + self.head_dim // self.quant_block_size * 4 
+        dtype = torch.bfloat16 if self.quant_config is None else torch.uint8
         self.k_cache = DeepseekV4IndexerCache(
             head_dim=k_cache_head_dim,
-            dtype=torch.uint8,
+            dtype=dtype,
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
             compress_ratio=self.compress_ratio,
@@ -978,18 +1148,31 @@ class DeepseekV4Indexer(nn.Module):
             use_fp4_cache=self.use_fp4_kv,
         )
 
-        self.indexer_op = SparseAttnIndexer(
-            self.k_cache,
-            self.quant_block_size,
-            self.scale_fmt,
-            self.topk_tokens,
-            self.head_dim,
-            self.max_model_len,
-            self.max_total_seq_len,
-            self.topk_indices_buffer,
-            skip_k_cache_insert=True,
-            use_fp4_cache=self.use_fp4_kv,
-        )
+        if self.quant_config is not None:
+            self.indexer_op = SparseAttnIndexer(
+                self.k_cache,
+                self.quant_block_size,
+                self.scale_fmt,
+                self.topk_tokens,
+                self.head_dim,
+                self.max_model_len,
+                self.max_total_seq_len,
+                self.topk_indices_buffer,
+                skip_k_cache_insert=True,
+                use_fp4_cache=self.use_fp4_kv,
+            )
+        else:
+            self.indexer_op = SparseAttnIndexerBF16(
+                self.k_cache,
+                self.quant_block_size,
+                self.scale_fmt,
+                self.topk_tokens,
+                self.head_dim,
+                self.max_model_len,
+                self.max_total_seq_len,
+                self.topk_indices_buffer,
+                skip_k_cache_insert=True,
+            )
 
     def forward(
         self,
@@ -1004,13 +1187,23 @@ class DeepseekV4Indexer(nn.Module):
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
         k = self.compressor(compressed_kv_score, positions, rotary_emb)
-        q_quant, weights = _fused_indexer_q_rope_quant(
-            positions,
-            q,
-            rotary_emb.cos_sin_cache,
-            indexer_weights,
-            self.softmax_scale,
-            self.n_head**-0.5,
-            use_fp4=self.use_fp4_kv,
-        )
+        if self.quant_config is not None:
+            q_quant, weights = fused_indexer_q_rope_quant(
+                positions,
+                q,
+                rotary_emb.cos_sin_cache,
+                indexer_weights,
+                self.softmax_scale,
+                self.n_head**-0.5,
+                use_fp4=self.use_fp4_kv,
+            )
+        else:
+            q_quant, weights = _fused_indexer_q_rope(
+                positions,
+                q,
+                rotary_emb.cos_sin_cache,
+                indexer_weights,
+                self.softmax_scale,
+                self.n_head**-0.5,
+            )
         return self.indexer_op(hidden_states, q_quant, k, weights)

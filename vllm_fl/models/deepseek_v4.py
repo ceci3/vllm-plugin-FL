@@ -17,16 +17,25 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
+from vllm.model_executor.layers.deepseek_v4_attention import (
+    DeepseekV4MLAModules,
+    DeepseekV4MultiHeadLatentAttentionWrapper,
+)
 from vllm.model_executor.layers.fused_moe import FusedMoE, GateLinear
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
-from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
-    fused_topk_bias,
-)
+from vllm_fl.dispatch import BackendImplKind, CachedOp, get_default_manager
+
+_deepseek_v4_mega_moe_experts = CachedOp("deepseek_v4_mega_moe_experts")
+_fused_topk_bias = CachedOp("fused_topk_bias")
+_mhc_pre = CachedOp("mhc_pre")
+_mhc_post = CachedOp("mhc_post")
+_hc_head_fused_kernel = CachedOp("hc_head_fused_kernel")
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import (
@@ -48,6 +57,7 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -56,18 +66,66 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-
 from vllm_fl.ops.deepseek_v4_attention import (
-    DeepseekV4Indexer,
-    DeepseekV4MLAModules,
-    DeepseekV4MultiHeadLatentAttentionFLWrapper,
+    DeepseekV4Indexer as DeepseekV4IndexerFP8,
 )
- 
+from vllm_fl.ops.deepseek_v4_attention_bf16 import (
+    DeepseekV4Indexer as DeepseekV4IndexerBF16,
+    DeepseekV4MultiHeadLatentAttentionBF16Wrapper,
+)
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("bf16", "fp4", "fp8")
 
+
+def _torch_post_process_fp8_weight_block_bmm(
+    wq: torch.Tensor,
+    ws: torch.Tensor,
+    quant_block_shape: tuple[int, int],
+    bmm_batch_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Torch-only subset of DeepGEMM's FP8 post-processing for BMM.
+
+    When DeepGEMM is unavailable, scales remain in their ordinary FP32 block
+    layout; only the leading expert dimension required by fp8_einsum is
+    restored.  E8M0 checkpoint scales are losslessly expanded to FP32.
+    """
+    if wq.dtype != torch.float8_e4m3fn:
+        raise TypeError(f"Expected FP8 weights, got {wq.dtype}")
+    if wq.ndim != 2 or ws.ndim != 2:
+        raise ValueError("Expected two-dimensional FP8 weights and scales")
+    if bmm_batch_size <= 0 or wq.size(0) % bmm_batch_size:
+        raise ValueError("Weight rows must be divisible by bmm_batch_size")
+
+    if ws.dtype == torch.float8_e8m0fnu:
+        exponent = ws.view(torch.uint8).to(torch.int32)
+        ws = (exponent << 23).view(torch.float32)
+    elif ws.dtype != torch.float32:
+        raise TypeError(f"Expected FP32 or E8M0 scales, got {ws.dtype}")
+
+    block_m, block_k = quant_block_shape
+    rows = wq.size(0) // bmm_batch_size
+    cols = wq.size(1)
+    expected_scale_shape = (
+        bmm_batch_size * rows // block_m,
+        cols // block_k,
+    )
+    if tuple(ws.shape) != expected_scale_shape:
+        raise ValueError(
+            f"Expected scale shape {expected_scale_shape}, got {tuple(ws.shape)}"
+        )
+
+    return (
+        wq.view(bmm_batch_size, rows, cols),
+        ws.view(bmm_batch_size, rows // block_m, cols // block_k),
+    )
+
+
 class WOAColumnParallelLinear(ColumnParallelLinear):
-    def __init__(self,
+    """ColumnParallelLinear variant for wo_a that reshapes weights to 3D
+    for grouped BMM (fp8_einsum) after quantization processing."""
+
+    def __init__(
+        self,
         input_size: int,
         output_size: int,
         bias: bool = True,
@@ -92,21 +150,74 @@ class WOAColumnParallelLinear(ColumnParallelLinear):
             return_bias=return_bias,
             disable_tp=disable_tp,
         )
-        # Replace the quant_method's process_weights_after_loading on this
-        # instance so that utils.py's generic call triggers BMM reshape.
+        # Fix the FP8 einsum scale layout during weight initialization.
+        # FlagGems consumes the ordinary 3D FP32 block-scale grid, while
+        # DeepGEMM consumes its architecture-specific transformed layout.
         orig_fn = self.quant_method.process_weights_after_loading
 
         def _process_weights_after_loading(layer):
             orig_fn(layer)
-            if getattr(layer, "is_bmm", False):
-                w = layer.weight
-                if w.ndim == 2:
-                    g = layer.bmm_batch_size
-                    d = w.size(1)
-                    r = w.size(0) // g
-                    replace_parameter(layer, "weight", w.view(g, r, d))
+            if not getattr(layer, "is_bmm", False):
+                return
+            w = layer.weight
+            if w.ndim != 2:
+                # Already reshaped by the kernel (e.g. DeepGemm kernel)
+                return
 
-        self.quant_method.process_weights_after_loading = _process_weights_after_loading
+            g = layer.bmm_batch_size
+            ws = getattr(layer, "weight_scale_inv", None)
+            scale_attr = "weight_scale_inv"
+            if ws is None:
+                ws = getattr(layer, "weight_scale", None)
+                scale_attr = "weight_scale"
+            if ws is None:
+                # Unquantized BF16 wo_a still needs the grouped-BMM weight
+                # layout, but has no FP8 scale tensor to post-process.
+                replace_parameter(
+                    layer,
+                    "weight",
+                    w.view(g, w.size(0) // g, w.size(1)),
+                )
+                return
+
+            block_size = getattr(layer, "weight_block_size", [128, 128])
+            candidates = get_default_manager().resolve_candidates(
+                "deepseek_v4_fp8_einsum"
+            )
+            use_flaggems = (
+                candidates[0].kind == BackendImplKind.DEFAULT
+                and candidates[0].impl_id == "default.flagos"
+            )
+            if use_flaggems:
+                processed_weight, processed_scale = (
+                    _torch_post_process_fp8_weight_block_bmm(
+                        wq=w,
+                        ws=ws,
+                        quant_block_shape=tuple(block_size),
+                        bmm_batch_size=g,
+                    )
+                )
+            else:
+                from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+                    deepgemm_post_process_fp8_weight_block,
+                )
+                from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+
+                dg_weight, dg_scale = deepgemm_post_process_fp8_weight_block(
+                    wq=w,
+                    ws=ws,
+                    quant_block_shape=tuple(block_size),
+                    use_e8m0=is_deep_gemm_e8m0_used(),
+                    is_bmm=True,
+                    bmm_batch_size=g,
+                )
+                processed_weight, processed_scale = dg_weight, dg_scale
+            replace_parameter(layer, "weight", processed_weight)
+            replace_parameter(layer, scale_attr, processed_scale)
+
+        self.quant_method.process_weights_after_loading = (
+            _process_weights_after_loading
+        )
 
 
 class DeepseekV4MLP(nn.Module):
@@ -655,14 +766,14 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 f"but the symmetric buffer was sized for {self.max_num_tokens}."
             )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-        torch.ops.vllm.deepseek_v4_mega_moe_experts(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            y,
-            self.prefix,
-            activation_clamp,
-            fast_math,
+        _deepseek_v4_mega_moe_experts(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            out=y,
+            layer_name=self.prefix,
+            activation_clamp=activation_clamp,
+            fast_math=fast_math,
         )
         return y
 
@@ -706,6 +817,46 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
 
 DeepseekV4MegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
+
+
+# def _deepseek_v4_mega_moe_experts_op(
+#     hidden_states: torch.Tensor,
+#     topk_weights: torch.Tensor,
+#     topk_ids: torch.Tensor,
+#     out: torch.Tensor,
+#     layer_name: str,
+#     activation_clamp: float | None,
+#     fast_math: bool,
+# ) -> None:
+#     self = get_forward_context().no_compile_layers[layer_name]
+#     self._run_mega_moe(
+#         hidden_states,
+#         topk_weights,
+#         topk_ids,
+#         out,
+#         activation_clamp,
+#         fast_math,
+#     )
+
+
+# def _deepseek_v4_mega_moe_experts_op_fake(
+#     hidden_states: torch.Tensor,
+#     topk_weights: torch.Tensor,
+#     topk_ids: torch.Tensor,
+#     out: torch.Tensor,
+#     layer_name: str,
+#     activation_clamp: float | None,
+#     fast_math: bool,
+# ) -> None:
+#     return None
+
+
+# direct_register_custom_op(
+#     op_name="deepseek_v4_mega_moe_experts",
+#     op_func=_deepseek_v4_mega_moe_experts_op,
+#     mutates_args=["out"],
+#     fake_impl=_deepseek_v4_mega_moe_experts_op_fake,
+# )
 
 
 class DeepseekV4MoE(nn.Module):
@@ -870,7 +1021,7 @@ class DeepseekV4MoE(nn.Module):
 
         org_shape = hidden_states.shape
         router_logits, _ = self.gate(hidden_states)
-        topk_weights, topk_ids = fused_topk_bias(
+        topk_weights, topk_ids = _fused_topk_bias(
             hidden_states=hidden_states,
             gating_output=router_logits,
             scoring_func=self.scoring_func,
@@ -991,24 +1142,14 @@ class DeepseekV4Attention(nn.Module):
         )
 
         self.kv_norm = RMSNorm(self.head_dim, self.eps)
-        if quant_config is None:
-            self.wo_a = WOAColumnParallelLinear(
-                self.n_heads * self.head_dim // self.n_groups,
-                self.n_groups * self.o_lora_rank,
-                bias=False,
-                quant_config=quant_config,
-                return_bias=False,
-                prefix=f"{prefix}.wo_a",
-            )
-        else:
-            self.wo_a = ColumnParallelLinear(
-                self.n_heads * self.head_dim // self.n_groups,
-                self.n_groups * self.o_lora_rank,
-                bias=False,
-                quant_config=quant_config,
-                return_bias=False,
-                prefix=f"{prefix}.wo_a",
-            )
+        self.wo_a = WOAColumnParallelLinear(
+            self.n_heads * self.head_dim // self.n_groups,
+            self.n_groups * self.o_lora_rank,
+            bias=False,
+            quant_config=quant_config,
+            return_bias=False,
+            prefix=f"{prefix}.wo_a",
+        )
         self.wo_a.is_bmm = True
         self.wo_a.bmm_batch_size = self.n_local_groups
         self.wo_b = RowParallelLinear(
@@ -1020,7 +1161,10 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_b",
         )
         self.softmax_scale = self.head_dim**-0.5
-        self.scale_fmt = config.quantization_config["scale_fmt"] if getattr(config, "quantization_config", None) else None
+        hf_quant_config = getattr(config, "quantization_config", None)
+        self.scale_fmt = (
+            hf_quant_config["scale_fmt"] if hf_quant_config is not None else None
+        )
 
         self.rope_parameters = config.rope_scaling
 
@@ -1049,7 +1193,12 @@ class DeepseekV4Attention(nn.Module):
         self.indexer = None
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
-            self.indexer = DeepseekV4Indexer(
+            indexer_cls = (
+                DeepseekV4IndexerBF16
+                if getattr(config, "expert_dtype", "fp4") == "bf16"
+                else DeepseekV4IndexerFP8
+            )
+            self.indexer = indexer_cls(
                 vllm_config,
                 config=config,
                 hidden_size=self.hidden_size,
@@ -1076,7 +1225,17 @@ class DeepseekV4Attention(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
         )
-        self.mla_attn = DeepseekV4MultiHeadLatentAttentionFLWrapper(
+        # MLA precision follows the projection's effective quantization method,
+        # independently of the experts' quantization format.
+        use_bf16_attention = isinstance(
+            self.wo_a.quant_method, UnquantizedLinearMethod
+        )
+        attention_wrapper_cls = (
+            DeepseekV4MultiHeadLatentAttentionBF16Wrapper
+            if use_bf16_attention
+            else DeepseekV4MultiHeadLatentAttentionWrapper
+        )
+        self.mla_attn = attention_wrapper_cls(
             hidden_size=self.hidden_size,
             num_heads=self.n_local_heads,
             head_dim=self.head_dim,
@@ -1188,7 +1347,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
     ):
-        post_mix, res_mix, layer_input = torch.ops.vllm.mhc_pre(
+        post_mix, res_mix, layer_input = _mhc_pre(
             residual=x,
             fn=hc_fn,
             hc_scale=hc_scale,
@@ -1208,7 +1367,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         post: torch.Tensor,
         comb: torch.Tensor,
     ):
-        return torch.ops.vllm.mhc_post(x, residual, post, comb)
+        return _mhc_post( x=x, residual=residual, post=post, comb=comb)
 
     def forward(
         self,
@@ -1258,7 +1417,7 @@ class DeepseekV4Model(nn.Module):
         self.rms_norm_eps = config.rms_norm_eps
 
         # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4MultiHeadLatentAttentionFLWrapper.attn_gemm_parallel_execute
+        # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
         # kv_score). fused_wqa_wkv stays on the default stream.
         aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
@@ -1395,8 +1554,8 @@ class DeepseekV4Model(nn.Module):
                 name = name.replace(weight_name, param_name)
 
                 if name not in params_dict:
-                    # The checkpoint may include a stacked compressor tensor
-                    # for a layer that does not instantiate a compressor.
+                    # A checkpoint can contain a stacked compressor tensor for
+                    # a layer whose selected attention path has no compressor.
                     break
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -1438,8 +1597,9 @@ class DeepseekV4Model(nn.Module):
                         except RuntimeError as exc:
                             raise RuntimeError(
                                 "Failed loading expert weight "
-                                f"{name!r} -> {name_mapped!r}, shard={shard_id!r}, "
-                                f"expert={expert_id}, source_shape={tuple(loaded_weight.shape)}, "
+                                f"{name!r} -> {name_mapped!r}, "
+                                f"shard={shard_id!r}, expert={expert_id}, "
+                                f"source_shape={tuple(loaded_weight.shape)}, "
                                 f"param_shape={tuple(param.shape)}"
                             ) from exc
                         if success:
@@ -1448,9 +1608,8 @@ class DeepseekV4Model(nn.Module):
                     loaded_params.add(name_mapped)
                     continue
                 elif name not in params_dict:
-                    # Checkpoints may contain routing/compressor metadata for
-                    # layers whose selected runtime implementation does not
-                    # instantiate the corresponding parameter.
+                    # Optional routing/compressor state can be absent from the
+                    # selected FP8 or BF16 runtime implementation.
                     continue
                 elif "attn_sink" in name:
                     narrow_weight = loaded_weight[head_rank_start:head_rank_end]
@@ -1463,16 +1622,7 @@ class DeepseekV4Model(nn.Module):
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
-                    try:
-                        weight_loader(param, loaded_weight)
-                    except AttributeError as e:
-                        raise AttributeError(
-                            f"Failed to load weight '{name}': "
-                            f"param type={type(param).__name__}, "
-                            f"weight_loader={weight_loader}, "
-                            f"param.shape={param.shape}, "
-                            f"loaded_weight.shape={loaded_weight.shape}"
-                        ) from e
+                    weight_loader(param, loaded_weight)
                     loaded_params.add(name)
                     continue
 
@@ -1513,16 +1663,16 @@ def hc_head(
     out = torch.empty(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
     )
-    torch.ops.vllm.hc_head_fused_kernel(
-        hs_flat,
-        hc_fn,
-        hc_scale,
-        hc_base,
-        out,
-        hidden_size,
-        rms_norm_eps,
-        hc_eps,
-        hc_mult,
+    _hc_head_fused_kernel(
+        hs_flat=hs_flat,
+        fn=hc_fn,
+        hc_scale=hc_scale,
+        hc_base=hc_base,
+        out=out,
+        hidden_size=hidden_size,
+        rms_eps=rms_norm_eps,
+        hc_eps=hc_eps,
+        hc_mult=hc_mult,
     )
     return out.view(*outer_shape, hidden_size)
 

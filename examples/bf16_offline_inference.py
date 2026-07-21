@@ -34,25 +34,15 @@ if __name__ == "__main__":
     sampling_params = SamplingParams(max_tokens=30, temperature=0.0)
     # Create an LLM.
     llm = LLM(model="/mine/DeepSeek-V4-Flash-BF16/",
-              hf_overrides={
-                  "expert_dtype": "bf16",
-                  "num_hidden_layers": 3,
-                  "num_hash_layers": 3,
-                  "quantization_config": None,
-              },
-    # llm = LLM(model="/models/DeepSeek-V4-Flash-FP8/",
-    # llm = LLM(model="/models/DeepSeek-V4-Flash/",
               max_num_batched_tokens=16384, 
               max_num_seqs=2048, 
-              tensor_parallel_size=1,
+              tensor_parallel_size=8,
               kv_cache_dtype="bfloat16",
-              block_size=256,
               enable_expert_parallel=True,
-              enforce_eager=True,
               compilation_config=CompilationConfig(mode=CompilationMode.NONE, cudagraph_mode="FULL_DECODE_ONLY"),
               tokenizer_mode="deepseek_v4",
+              load_format="dummy",
               gpu_memory_utilization=0.8)
-            #   speculative_config={"method":"mtp","num_speculative_tokens":1})
 
 
     with nvtx.annotate("LLM Generation", color="blue"):
