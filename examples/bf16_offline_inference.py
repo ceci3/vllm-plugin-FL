@@ -14,7 +14,6 @@ from vllm import LLM, SamplingParams
 # Check Platform
 from vllm.platforms import current_platform
 from vllm.config.compilation import CompilationConfig, CompilationMode
-import nvtx
 
 print(f"Current Platform: {current_platform}")
 print(f"Platform Type: {type(current_platform)}")
@@ -41,13 +40,12 @@ if __name__ == "__main__":
               enable_expert_parallel=True,
               compilation_config=CompilationConfig(mode=CompilationMode.NONE, cudagraph_mode="FULL_DECODE_ONLY"),
               tokenizer_mode="deepseek_v4",
-              load_format="dummy",
+              safetensors_load_strategy="prefetch",
+              speculative_config={"method":"mtp","num_speculative_tokens":1},
               gpu_memory_utilization=0.8)
 
 
-    with nvtx.annotate("LLM Generation", color="blue"):
-        # Generate texts from the prompts.
-        outputs = llm.generate(prompts, sampling_params)
+    outputs = llm.generate(prompts, sampling_params)
 
     for output in outputs:
         prompt = output.prompt
