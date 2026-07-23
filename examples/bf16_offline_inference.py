@@ -5,15 +5,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-# os.environ['USE_FLAGGEMS']='0'
 
 import torch
 
 from vllm import LLM, SamplingParams
-
-# Check Platform
-from vllm.platforms import current_platform
 from vllm.config.compilation import CompilationConfig, CompilationMode
+from vllm.platforms import current_platform
 
 print(f"Current Platform: {current_platform}")
 print(f"Platform Type: {type(current_platform)}")
