@@ -44,6 +44,7 @@ _R = TypeVar("_R")
 dist_backend_dict = {
     "npu": "hccl",
     "cuda": "nccl",
+    "gcu": "eccl",
     "musa": "mccl",
 }
 
@@ -97,6 +98,8 @@ class PlatformFL(Platform):
             return True
         if self.vendor_name == "hygon":
             return False
+        if self.vendor_name == "gcu":
+            return True
         return self.device_type == "cuda"
 
     def is_cuda(self) -> bool:
@@ -107,6 +110,12 @@ class PlatformFL(Platform):
         if hasattr(torch, 'musa') and torch.musa.is_available():
             return True
         return False
+
+    def is_gcu(self) -> bool:
+        if hasattr(torch, 'gcu') and torch.gcu.is_available():
+            return True
+        return False
+
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.float16, torch.float32]
@@ -144,7 +153,7 @@ class PlatformFL(Platform):
     ### TODO(lms): change pin_memory depend device
     @classmethod
     def is_pin_memory_available(cls):
-        if cls.device_type in ["cuda", "xpu", "npu", "musa", "txda"]:
+        if cls.device_type in ["cuda", "xpu", "npu", "musa", "txda", "gcu"]:
             return True
         return False
 
@@ -270,6 +279,9 @@ class PlatformFL(Platform):
                 attention_config.use_trtllm_attention = False
                 attention_config.disable_flashinfer_prefill = True
 
+        if cls.vendor_name == "gcu":
+            parallel_config.disable_custom_all_reduce = True
+
     @classmethod
     def get_attn_backend_cls(
         cls,
@@ -354,7 +366,7 @@ class PlatformFL(Platform):
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
-        if cls.vendor_name in ["nvidia", "ascend", "metax", "hygon", "mthreads", "iluvatar", "thead"]:
+        if cls.vendor_name in ["nvidia", "ascend", "metax", "hygon", "mthreads", "iluvatar", "thead", "gcu"]:
             return True
         return False
 
@@ -403,12 +415,19 @@ class PlatformFL(Platform):
     def pre_register_and_update(cls, parser=None) -> None:
         if cls.device_name == "npu":
             import vllm_fl.dispatch.backends.vendor.ascend
+        elif cls.device_name == "gcu":
+            import vllm_fl.dispatch.backends.vendor.gcu  # noqa: F401
 
     @classmethod
     def supports_fp8(cls) -> bool:
         """Return whether the current device architecture supports FP8."""
         if cls.vendor_name == "mthreads":
             return True
+
+        if cls.vendor_name == "gcu":
+            cc = cls.get_device_capability()
+            return cc is not None and cc.major >= 4
+
         if cls.vendor_name != "nvidia":
             return False
         try:
@@ -463,7 +482,13 @@ class PlatformFL(Platform):
             return DeviceCapability(major=major, minor=minor)
         # TODO: For PTPU/Sunrise devices, return None
         if cls.device_type == "ptpu":
-            return None
+            return None        
+        if cls.device_type == "gcu":
+            gcu = getattr(torch, "gcu", None)
+            if gcu is None:
+                return None
+            major, minor = gcu.get_device_capability(device_id)
+            return DeviceCapability(major=major, minor=minor)
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 
