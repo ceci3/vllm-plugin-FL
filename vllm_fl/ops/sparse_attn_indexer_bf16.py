@@ -1,25 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Custom Sparse Attention Indexer layers."""
+"""Custom Sparse Attention Indexer layers (BF16 path)."""
 
 import torch
 from flag_gems.fused import bf16_paged_mqa_logits
 
 import vllm.envs as envs
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import has_deep_gemm
-try:
-    from vllm.v1.attention.ops.deepseek_v4_ops.bf16_mqa_logits import (
-        gather_bf16_kv_from_pages,
-    )
-except ModuleNotFoundError:
-    from vllm_fl.dispatch.backends.vendor.cuda.impl.deepseek_v4_ops.mqa_logits import (
-        gather_bf16_kv_from_pages,
-    )
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -29,15 +19,17 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
-from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
-if current_platform.is_cuda_alike():
-    pass
-elif current_platform.is_xpu():
-    from vllm._xpu_ops import xpu_ops
+from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm_fl.dispatch import CachedOp
 
-from vllm_fl.dispatch import call_op
+_cp_gather_indexer_k_bf16_cache = CachedOp("gather_bf16_kv_from_pages")
+_bf16_mqa_logits = CachedOp("bf16_mqa_logits")
+_top_k_per_row_prefill = CachedOp("top_k_per_row_prefill")
+_pack_seq_triton = CachedOp("pack_seq_triton")
+_top_k_per_row_decode = CachedOp("top_k_per_row_decode")
+_unpack_seq_triton = CachedOp("unpack_seq_triton")
 
 logger = init_logger(__name__)
 
@@ -254,19 +246,28 @@ def sparse_attn_indexer_bf16(
     if not skip_k_cache_insert:
         # For BF16 cache, insert K directly without quantization.
         # kv_cache: [num_blocks, block_size, head_dim], k: [num_tokens, head_dim]
+        # Vectorized scatter instead of Python for-loop.
         block_size_val = kv_cache.shape[1]
-        for i in range(num_tokens):
-            slot = int(slot_mapping[i].item())
-            if slot == -1:
-                continue
-            blk_idx = slot // block_size_val
-            pos_in_blk = slot % block_size_val
-            kv_cache[blk_idx, pos_in_blk] = k[i]
+        valid_mask = slot_mapping >= 0
+        valid_slots = slot_mapping[valid_mask]
+        valid_k = k[valid_mask]
+        blk_indices = valid_slots // block_size_val
+        pos_indices = valid_slots % block_size_val
+        kv_cache[blk_indices, pos_indices] = valid_k
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
+
+        # Get the full shared workspace buffer once (will allocate on first use).
+        workspace_manager = current_workspace_manager()
+        (values_spec,) = _gather_workspace_shapes(
+            total_seq_lens, head_dim
+        )
+        (kv_buf_full,) = workspace_manager.get_simultaneous(
+            values_spec,
+        )
 
         kv_cache_4d = kv_cache_as_quant_view(
             kv_cache, head_dim, use_fp4_cache=False
@@ -323,46 +324,23 @@ def sparse_attn_indexer_bf16(
                     chunk.token_start : chunk.token_end, :topk_tokens
                 ]
 
-                if current_platform.is_xpu():
-                    xpu_ops.top_k_per_row_prefill(
-                        logits,
-                        cu_ks_zero,
-                        cu_ke_local,
-                        topk_indices,
-                        num_rows,
-                        logits.stride(0),
-                        logits.stride(1),
-                        topk_tokens,
-                    )
-                else:
-                    torch.ops._C.top_k_per_row_prefill(
-                        logits,
-                        cu_ks_zero,
-                        cu_ke_local,
-                        topk_indices,
-                        num_rows,
-                        logits.stride(0),
-                        logits.stride(1),
-                        topk_tokens,
-                    )
-
-                # topk_indices are already 0-based within each row's KV
-                # range — same as the old non-paged path (top_k_per_row_prefill
-                # outputs indices relative to rowStart).
+                _top_k_per_row_prefill(
+                    logits,
+                    cu_ks_zero,
+                    cu_ke_local,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
             else:
                 # Fallback: gather + non-paged kernel (for non-CUDA or
                 # when schedule_metadata is unavailable)
-                workspace_manager = current_workspace_manager()
-                (values_spec,) = _gather_workspace_shapes(
-                    total_seq_lens, head_dim
-                )
-                (kv_buf_full,) = workspace_manager.get_simultaneous(
-                    values_spec
-                )
                 kv_buf = kv_buf_full[: chunk.total_seq_lens]
 
                 if not chunk.skip_kv_gather:
-                    call_op("gather_bf16_kv_from_pages",
+                    _cp_gather_indexer_k_bf16_cache(
                         kv_cache,
                         chunk.block_table,
                         chunk.cu_seq_lens,
@@ -371,7 +349,7 @@ def sparse_attn_indexer_bf16(
                         dst=kv_buf,
                     )
 
-                logits = call_op("bf16_mqa_logits",
+                logits = _bf16_mqa_logits(
                     q_slice,
                     kv_buf,
                     w_slice,
@@ -385,28 +363,16 @@ def sparse_attn_indexer_bf16(
                     chunk.token_start : chunk.token_end, :topk_tokens
                 ]
 
-                if current_platform.is_xpu():
-                    xpu_ops.top_k_per_row_prefill(
-                        logits,
-                        chunk.cu_seqlen_ks,
-                        chunk.cu_seqlen_ke,
-                        topk_indices,
-                        num_rows,
-                        logits.stride(0),
-                        logits.stride(1),
-                        topk_tokens,
-                    )
-                else:
-                    torch.ops._C.top_k_per_row_prefill(
-                        logits,
-                        chunk.cu_seqlen_ks,
-                        chunk.cu_seqlen_ke,
-                        topk_indices,
-                        num_rows,
-                        logits.stride(0),
-                        logits.stride(1),
-                        topk_tokens,
-                    )
+                _top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
@@ -418,20 +384,15 @@ def sparse_attn_indexer_bf16(
             # decode_threshold since we unstrictly split
             # prefill and decode by decode_threshold
             # (currently set to 1 + speculative tokens).
-            # FP8 Q is float8_e4m3fn (pack_seq_triton's fp32 pad path is OK —
-            # downstream context_lens masks stale slots). MXFP4 Q is two
-            # uint8 tensors (values + ue8m0 scales) — use the dedicated uint8
-            # packer with pad_byte=0 so padded slots dequantize to 0 and
-            # can't produce NaN/Inf in the logits kernel.
             if q_scale is not None:
-                padded_q_quant_decode_tokens = pack_seq_triton(
+                padded_q_quant_decode_tokens = _pack_seq_triton(
                     q_quant[:num_decode_tokens], decode_lens, pad_value=0
                 )
-                padded_q_scale = pack_seq_triton(
+                padded_q_scale = _pack_seq_triton(
                     q_scale[:num_decode_tokens], decode_lens, pad_value=0
                 )
             else:
-                padded_q_quant_decode_tokens = pack_seq_triton(
+                padded_q_quant_decode_tokens = _pack_seq_triton(
                     q_quant[:num_decode_tokens], decode_lens
                 )
                 padded_q_scale = None
@@ -453,9 +414,7 @@ def sparse_attn_indexer_bf16(
         # seq_lens is always 2D: (B, next_n) for native spec decode, (B, 1)
         # otherwise. deep_gemm bf16_paged_mqa_logits requires 2D context_lens;
         # the downstream topk kernels accept both 1D and 2D.
-        padded_q_quant_cast = (
-            padded_q_quant_decode_tokens
-        )
+        padded_q_quant_cast = padded_q_quant_decode_tokens
         logits = _bf16_paged_mqa_logits_head_sharded(
             padded_q_quant_cast,
             kv_cache,
@@ -469,47 +428,21 @@ def sparse_attn_indexer_bf16(
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        if current_platform.is_cuda() and topk_tokens in (512, 1024, 2048):
-            workspace_manager = current_workspace_manager()
-            (topk_workspace,) = workspace_manager.get_simultaneous(
-                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
-            )
-            torch.ops._C.persistent_topk(
-                logits,
-                seq_lens,
-                topk_indices,
-                topk_workspace,
-                topk_tokens,
-                attn_metadata_narrowed.max_seq_len,
-            )
-        else:
-            if current_platform.is_xpu():
-                xpu_ops.top_k_per_row_decode(  # type: ignore[attr-defined]
-                    logits,
-                    next_n,
-                    seq_lens,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
-            else:
-                torch.ops._C.top_k_per_row_decode(
-                    logits,
-                    next_n,
-                    seq_lens,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
+        _top_k_per_row_decode(
+            logits,
+            next_n,
+            seq_lens,
+            topk_indices,
+            num_rows,
+            logits.stride(0),
+            logits.stride(1),
+            topk_tokens,
+        )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
             # the topk indices removing padded tokens
-            topk_indices = unpack_seq_triton(
+            topk_indices = _unpack_seq_triton(
                 topk_indices.reshape(batch_size, -1, topk_indices.shape[-1]),
                 decode_lens,
             )
@@ -549,17 +482,12 @@ direct_register_custom_op(
 )
 
 
-@CustomOp.register("sparse_attn_indexer_bf16")
-class SparseAttnIndexerBF16(CustomOp):
-    """Sparse Attention Indexer Custom Op Layer. This layer is extracted as a
-    separate custom op since it involves heavy custom kernels like `mqa_logits`,
-    `paged_mqa_logits` and `top_k_per_row`, etc. Those kernels maybe requires
-    specific memory layout or implementation for different hardware backends to
-    achieve optimal performance.
+class SparseAttnIndexerBF16(SparseAttnIndexer):
+    """Sparse Attention Indexer for BF16 KV cache path.
 
-    For now, the default native path will use CUDA backend path. Other platform
-    may requires add the corresponding Custom Op name `sparse_attn_indexer_bf16` to
-    `custom_ops` in `CompilationConfig` to enable the platform specific path.
+    Inherits from the base SparseAttnIndexer and overrides forward via
+    forward_oot to dispatch through the unified CachedOp mechanism,
+    eliminating platform-specific branching.
     """
 
     def __init__(
@@ -574,47 +502,35 @@ class SparseAttnIndexerBF16(CustomOp):
         topk_indices_buffer: torch.Tensor,
         skip_k_cache_insert: bool = False,
     ):
-        super().__init__()
-        self.k_cache = k_cache
-        self.quant_block_size = quant_block_size
-        self.scale_fmt = scale_fmt
-        self.topk_tokens = topk_tokens
-        self.head_dim = head_dim
-        self.max_model_len = max_model_len
-        self.max_total_seq_len = max_total_seq_len
-        self.topk_indices_buffer = topk_indices_buffer
-        self.skip_k_cache_insert = skip_k_cache_insert
-        if current_platform.is_cuda() and not has_deep_gemm():
-            raise RuntimeError(
-                "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
-            )
+        super().__init__(
+            k_cache=k_cache,
+            quant_block_size=quant_block_size,
+            scale_fmt=scale_fmt,
+            topk_tokens=topk_tokens,
+            head_dim=head_dim,
+            max_model_len=max_model_len,
+            max_total_seq_len=max_total_seq_len,
+            topk_indices_buffer=topk_indices_buffer,
+            skip_k_cache_insert=skip_k_cache_insert,
+            use_fp4_cache=False,
+        )
 
-    def forward_native(
+    def forward(
         self,
         hidden_states: torch.Tensor,
         q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
-        if current_platform.is_cuda() or current_platform.is_xpu():
-            return self.forward_cuda(hidden_states, q_quant, k, weights)
-        elif current_platform.is_rocm():
-            return self.forward_hip(hidden_states, q_quant, k, weights)
-        else:
-            raise NotImplementedError(
-                "SparseAttnIndexer native forward is only implemented for "
-                "CUDA, ROCm and XPU platforms."
-            )
+        return self.forward_oot(hidden_states, q_quant, k, weights)
 
-    def forward_cuda(
+    def forward_oot(
         self,
         hidden_states: torch.Tensor,
         q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
-        # FP8 path: single tensor (per-token scale is folded into `weights`).
-        # FP4 path: (values, scales) tuple with scales required by the kernel.
         if isinstance(q_quant, tuple):
             q_values, q_scale = q_quant
         else:
@@ -635,16 +551,4 @@ class SparseAttnIndexerBF16(CustomOp):
             self.max_total_seq_len,
             self.topk_indices_buffer,
             self.skip_k_cache_insert,
-        )
-
-    def forward_hip(
-        self,
-        hidden_states: torch.Tensor,
-        q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        weights: torch.Tensor,
-    ):
-        raise RuntimeError(
-            "Sparse attention indexer ROCm custom op requires ROCm "
-            "Aiter ops to be enabled."
         )
