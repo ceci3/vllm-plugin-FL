@@ -79,9 +79,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
 from vllm.utils.multi_stream_utils import (
-    execute_in_parallel,
     maybe_execute_in_parallel,
 )
+try:
+    from vllm.utils.multi_stream_utils import execute_in_parallel
+except: 
+    execute_in_parallel = None
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     DeepseekV4FlashMLASparseBackend,
@@ -406,15 +409,22 @@ class DeepseekV4MultiHeadLatentAttentionBF16Wrapper(PluggableLayer):
             qr_kv, _ = self.fused_wqa_wkv(hidden_states)
             return qr_kv
 
-        qr_kv, (kv_score, indexer_weights, indexer_kv_score) = execute_in_parallel(
-            fused_wqa_wkv,
-            aux_fns,
-            self.ln_events[0],
-            self.ln_events[1:4],
-            self.aux_stream_list[:3],
-            enable=hidden_states.shape[0]
-            <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD,
-        )
+        if execute_in_parallel:
+             qr_kv, (kv_score, indexer_weights, indexer_kv_score) = execute_in_parallel(
+                 fused_wqa_wkv,
+                 aux_fns,
+                 self.ln_events[0],
+                 self.ln_events[1:4],
+                 self.aux_stream_list[:3],
+                 enable=hidden_states.shape[0]
+                 <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD,
+             )
+        else:
+            qr_kv, _ = self.fused_wqa_wkv(hidden_states)
+            kv_score = compressor_kv_score() if self.compressor is not None else None
+            indexer_weights = indexer_weights_proj() if self.indexer is not None else None
+            indexer_kv_score = indexer_compressor_kv_score() if self.indexer is not None else None
+
 
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
 

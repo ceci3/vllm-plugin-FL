@@ -29,18 +29,21 @@ if __name__ == "__main__":
     # Create a sampling params object.
     sampling_params = SamplingParams(max_tokens=30, temperature=0.0)
     # Create an LLM.
-    llm = LLM(model="/mine/DeepSeek-V4-Flash-BF16/",
-              max_num_batched_tokens=16384, 
-              max_num_seqs=2048, 
-              tensor_parallel_size=8,
-              kv_cache_dtype="bfloat16",
-              enable_expert_parallel=True,
-              compilation_config=CompilationConfig(mode=CompilationMode.NONE, cudagraph_mode="FULL_DECODE_ONLY"),
-              tokenizer_mode="deepseek_v4",
-              safetensors_load_strategy="prefetch",
-              speculative_config={"method":"mtp","num_speculative_tokens":1},
-              gpu_memory_utilization=0.8)
-
+    llm = LLM(
+        model="/mine/DeepSeek-V4-Flash-BF16/",
+        max_num_batched_tokens=16384,
+        max_num_seqs=2048,
+        tensor_parallel_size=8,
+        kv_cache_dtype="bfloat16",
+        enable_expert_parallel=True,
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.NONE, cudagraph_mode="FULL_DECODE_ONLY"
+        ),
+        tokenizer_mode="deepseek_v4",
+        safetensors_load_strategy="prefetch",
+        speculative_config={"method": "mtp", "num_speculative_tokens": 1},
+        gpu_memory_utilization=0.8,
+    )
 
     outputs = llm.generate(prompts, sampling_params)
 
