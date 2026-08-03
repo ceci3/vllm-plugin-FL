@@ -4505,6 +4505,7 @@ class ModelRunnerFL(
         assert self.draft_token_ids_cpu is not None
         default_stream = current_platform.torch_device_fn.current_stream()
         num_reqs = draft_token_ids.shape[0]
+        num_spec_tokens = draft_token_ids.shape[1]
         with current_platform.torch_device_fn.stream(self.draft_token_ids_copy_stream):
             if not zeros_only:
                 # Trigger async copy of draft token ids to cpu.
