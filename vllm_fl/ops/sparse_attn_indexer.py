@@ -89,7 +89,7 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
-def _sparse_attn_indexer_int8_impl(
+def _sparse_attn_indexer_dispatch_impl(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
@@ -395,7 +395,7 @@ def sparse_attn_indexer_int8(
 ) -> torch.Tensor:
     """Registered vLLM custom op for the direct INT8 indexer path."""
     assert q_int8.dtype == torch.int8
-    return _sparse_attn_indexer_int8_impl(
+    return _sparse_attn_indexer_dispatch_impl(
         hidden_states,
         k_cache_prefix,
         kv_cache,
@@ -443,8 +443,84 @@ direct_register_custom_op(
 )
 
 
-class SparseAttnIndexerINT8(SparseAttnIndexer):
-    """DeepSeek sparse indexer using direct INT8 Q/K and INT8 logits."""
+def sparse_attn_indexer_fl(
+    hidden_states: torch.Tensor,
+    k_cache_prefix: LayerNameType,
+    kv_cache: torch.Tensor,
+    q_quant: torch.Tensor,
+    q_scale: torch.Tensor | None,
+    k: torch.Tensor,
+    weights: torch.Tensor,
+    quant_block_size: int,
+    scale_fmt: str | None,
+    topk_tokens: int,
+    head_dim: int,
+    max_model_len: int,
+    total_seq_lens: int,
+    topk_indices_buffer: torch.Tensor,
+    skip_k_cache_insert: bool,
+    use_fp4_cache: bool = False,
+) -> torch.Tensor:
+    """FL-dispatched FP8/FP4 indexer implementation.
+
+    Keep the upstream SparseAttnIndexer interface, while routing cache,
+    gather, packing and TopK helpers through vllm_fl.dispatch.CachedOp.
+    """
+    assert q_quant.dtype != torch.int8, (
+        "INT8 Q must use sparse_attn_indexer_int8"
+    )
+    return _sparse_attn_indexer_dispatch_impl(
+        hidden_states,
+        k_cache_prefix,
+        kv_cache,
+        q_quant,
+        q_scale,
+        k,
+        weights,
+        quant_block_size,
+        scale_fmt,
+        topk_tokens,
+        head_dim,
+        max_model_len,
+        total_seq_lens,
+        topk_indices_buffer,
+        skip_k_cache_insert,
+        use_fp4_cache,
+    )
+
+
+def sparse_attn_indexer_fl_fake(
+    hidden_states: torch.Tensor,
+    k_cache_prefix: LayerNameType,
+    kv_cache: torch.Tensor,
+    q_quant: torch.Tensor,
+    q_scale: torch.Tensor | None,
+    k: torch.Tensor,
+    weights: torch.Tensor,
+    quant_block_size: int,
+    scale_fmt: str | None,
+    topk_tokens: int,
+    head_dim: int,
+    max_model_len: int,
+    total_seq_lens: int,
+    topk_indices_buffer: torch.Tensor,
+    skip_k_cache_insert: bool,
+    use_fp4_cache: bool = False,
+) -> torch.Tensor:
+    return topk_indices_buffer
+
+
+direct_register_custom_op(
+    op_name="sparse_attn_indexer_fl",
+    op_func=sparse_attn_indexer_fl,
+    mutates_args=["topk_indices_buffer"],
+    fake_impl=sparse_attn_indexer_fl_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
+
+
+class SparseAttnIndexerFL(SparseAttnIndexer):
+    """Unified Python layer for FL-dispatched FP8/FP4 and direct INT8."""
 
     def forward_native(
         self,
@@ -462,13 +538,35 @@ class SparseAttnIndexerINT8(SparseAttnIndexer):
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
-        assert isinstance(q_quant, torch.Tensor)
-        assert q_quant.dtype == torch.int8
-        return torch.ops.vllm.sparse_attn_indexer_int8(
+        if isinstance(q_quant, tuple):
+            q_values, q_scale = q_quant
+        else:
+            q_values, q_scale = q_quant, None
+        if q_values.dtype == torch.int8:
+            assert q_scale is None
+            assert not self.use_fp4_cache
+            return torch.ops.vllm.sparse_attn_indexer_int8(
+                hidden_states,
+                _encode_layer_name(self.k_cache.prefix),
+                self.k_cache.kv_cache,
+                q_values,
+                k,
+                weights,
+                self.quant_block_size,
+                self.scale_fmt,
+                self.topk_tokens,
+                self.head_dim,
+                self.max_model_len,
+                self.max_total_seq_len,
+                self.topk_indices_buffer,
+                self.skip_k_cache_insert,
+            )
+        return torch.ops.vllm.sparse_attn_indexer_fl(
             hidden_states,
             _encode_layer_name(self.k_cache.prefix),
             self.k_cache.kv_cache,
-            q_quant,
+            q_values,
+            q_scale,
             k,
             weights,
             self.quant_block_size,
@@ -479,4 +577,5 @@ class SparseAttnIndexerINT8(SparseAttnIndexer):
             self.max_total_seq_len,
             self.topk_indices_buffer,
             self.skip_k_cache_insert,
+            self.use_fp4_cache,
         )

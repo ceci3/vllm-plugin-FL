@@ -26,8 +26,7 @@ from vllm_fl.ops.deepseek_v4_int8_indexer import (
     fused_indexer_q_rope_quant_int8,
 )
 from vllm_fl.ops.sparse_attn_indexer import (
-    SparseAttnIndexer,
-    SparseAttnIndexerINT8,
+    SparseAttnIndexerFL,
 )
 from vllm.model_executor.layers.utils import cublas_gemm_bf16_bf16_fp32
 from vllm_fl.dispatch import CachedOp
@@ -1234,10 +1233,7 @@ class DeepseekV4Indexer(nn.Module):
             use_fp4_cache=self.use_fp4_kv,
         )
 
-        indexer_cls = (
-            SparseAttnIndexerINT8 if self.use_int8_kv else SparseAttnIndexer
-        )
-        self.indexer_op = indexer_cls(
+        self.indexer_op = SparseAttnIndexerFL(
             self.k_cache,
             self.quant_block_size,
             self.scale_fmt,
