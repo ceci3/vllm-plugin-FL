@@ -264,6 +264,11 @@ def flash_mla_with_kvcache_cuda(
         extra_topk_length,
         out,
     ):
+        if not is_fp8_kvcache:
+            raise ValueError(
+                "flash_mla_with_kvcache only accepts the FP8 cache format; "
+                "INT8 KV cache must be dequantized to BF16 first"
+            )
         from vllm.v1.attention.ops.flashmla import flash_mla_with_kvcache
 
         return flash_mla_with_kvcache(

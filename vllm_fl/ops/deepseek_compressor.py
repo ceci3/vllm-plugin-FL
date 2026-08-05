@@ -36,7 +36,12 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
-
+from vllm_fl.ops.deepseek_v4_int8_kv import (
+    fused_compress_rope_int8_mla_cache_kernel,
+)
+from vllm_fl.ops.deepseek_v4_int8_indexer import (
+    fused_compress_rope_int8_indexer_cache_kernel,
+)
 
 class CompressorBackend(AttentionBackend):
     def __init__(self):
@@ -194,6 +199,11 @@ class DeepseekCompressor(nn.Module):
         self.prefix = prefix
         self.k_cache_prefix = k_cache_prefix
         self.use_fp4_cache = use_fp4_cache
+        requested_int8 = (
+            vllm_config.cache_config.cache_dtype == "int8_per_token_head"
+        )
+        self.use_int8_kv_cache = head_dim == 512 and requested_int8
+        self.use_int8_indexer_cache = head_dim == 128 and requested_int8
 
         config = vllm_config.model_config.hf_config
         self.rope_head_dim = config.qk_rope_head_dim
@@ -244,13 +254,24 @@ class DeepseekCompressor(nn.Module):
             assert not use_fp4_cache, (
                 "MXFP4 cache is only supported for indexer (head=128)"
             )
-            self._fused_kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
+            self._fused_kernel = (
+                fused_compress_rope_int8_mla_cache_kernel
+                if self.use_int8_kv_cache
+                else _fused_kv_compress_norm_rope_insert_sparse_attn
+            )
             self._quant_block = 64
             self._token_stride = self.nope_head_dim + self.rope_head_dim * 2
             self._scale_dim = self.nope_head_dim // 64 + 1  # 7 real + 1 pad
             self._num_warps = 4
         elif self.head_dim == 128:
-            if use_fp4_cache:
+            if self.use_int8_indexer_cache:
+                self._fused_kernel = (
+                    fused_compress_rope_int8_indexer_cache_kernel
+                )
+                self._quant_block = 128
+                self._token_stride = self.head_dim
+                self._scale_dim = 4
+            elif use_fp4_cache:
                 self._fused_kernel = (
                     _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn
                 )

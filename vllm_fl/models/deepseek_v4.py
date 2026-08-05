@@ -154,6 +154,16 @@ class WOAColumnParallelLinear(ColumnParallelLinear):
             orig_fn(layer)
             if not getattr(layer, "is_bmm", False):
                 return
+            # This grouped-BMM layout is exclusively for FP8 block weights
+            # consumed by fp8_einsum. INT W8A8 layers also expose ``weight``
+            # but their quantized Linear kernels require the original 2-D
+            # per-channel layout.
+            if (
+                not hasattr(layer, "weight")
+                or layer.weight.dtype != torch.float8_e4m3fn
+                or not hasattr(layer, "weight_scale_inv")
+            ):
+                return
             w = layer.weight
             if w.ndim != 2:
                 # Already reshaped by the kernel (e.g. DeepGemm kernel)
@@ -1146,7 +1156,15 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_b",
         )
         self.softmax_scale = self.head_dim**-0.5
-        self.scale_fmt = config.quantization_config["scale_fmt"]
+        # ``scale_fmt`` is a DeepSeek FP8 checkpoint extension.  Standard
+        # compressed-tensors checkpoints (including W8A16/W4A16 INT models)
+        # do not define it, and the attention wrapper does not require it.
+        quantization_config = getattr(config, "quantization_config", None)
+        self.scale_fmt = (
+            quantization_config.get("scale_fmt")
+            if isinstance(quantization_config, dict)
+            else None
+        )
 
         self.rope_parameters = config.rope_scaling
 
