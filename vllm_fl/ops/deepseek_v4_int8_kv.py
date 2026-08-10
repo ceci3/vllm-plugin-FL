@@ -5,12 +5,41 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-_NOPE_DIM = 448
-_HEAD_DIM = 512
-_TOKEN_DATA_BYTES = 576
-_TOKEN_PAGE_BYTES = 584
-_ROPE_BF16_OFFSET = _NOPE_DIM // 2
-_SCALE_F32_OFFSET = 576 // 4
+# DeepSeek-V4 INT8 page layout, shared by the writers and readers below.
+# Declared as ``tl.constexpr`` so the @triton.jit kernels can reference them
+# directly (plain module-level ints are rejected by Triton); use ``.value`` for
+# host-side arithmetic.
+#
+# Per-token page (584B):
+#   [0, 448)      448 x int8   NoPE
+#   [448, 576)    64 x bfloat16 RoPE
+#   [576, 584)    1 x float32 scale + 4B pad   (in the per-block scale region)
+_NOPE_DIM = tl.constexpr(448)
+_HEAD_DIM = tl.constexpr(512)
+_TOKEN_DATA_BYTES = tl.constexpr(576)
+_SCALE_SLOT_BYTES = tl.constexpr(8)
+# Offset of the RoPE half when the page is viewed as bfloat16 (448 / 2).
+_ROPE_BF16_OFFSET = tl.constexpr(224)
+
+# Plain-int mirror for host-side callers (KV cache shape/spec construction),
+# which cannot index with a tl.constexpr.
+INT8_TOKEN_PAGE_BYTES = 584
+
+
+@triton.jit
+def _round_to_int8(x):
+    """Symmetric round-half-away-from-zero, then clamp to the INT8 range.
+
+    ``x.to(tl.int8)`` truncates toward zero, which biases every quantized
+    magnitude downward by up to a full LSB instead of half of one. Adding the
+    signed 0.5 offset before the cast recovers round-to-nearest; ``tl.clamp``
+    runs afterwards so the offset itself cannot push a value out of range.
+    Written with plain arithmetic rather than libdevice ``rint`` to stay
+    portable across the vendor backends this plugin targets.
+    """
+    return tl.clamp(
+        x + tl.where(x >= 0, 0.5, -0.5), -127.0, 127.0
+    ).to(tl.int8)
 
 
 @triton.jit
@@ -69,7 +98,7 @@ def fused_compress_rope_int8_mla_cache_kernel(
     nope_mask = dims < nope_dim
     absmax = tl.max(tl.where(nope_mask, tl.abs(normalized), 0.0), axis=0)
     scale = tl.maximum(absmax / 127.0, 1.0e-12)
-    quant = tl.clamp(normalized / scale, -127.0, 127.0).to(tl.int8)
+    quant = _round_to_int8(normalized / scale)
     kv_block = kv_slot // kv_block_size
     kv_pos = kv_slot % kv_block_size
     block_base = kv_block.to(tl.int64) * KV_BLOCK_STRIDE
@@ -92,7 +121,11 @@ def fused_compress_rope_int8_mla_cache_kernel(
     rope_ptr = (k_cache + data_base + nope_dim).to(tl.pointer_type(tl.bfloat16))
     tl.store(rope_ptr + rope_local, rotated.to(tl.bfloat16),
              mask=(dims >= nope_dim) & dim_mask)
-    scale_base = block_base + kv_block_size * TOKEN_STRIDE + kv_pos * 8
+    scale_base = (
+        block_base
+        + kv_block_size * TOKEN_STRIDE
+        + kv_pos * _SCALE_SLOT_BYTES
+    )
     tl.store(k_cache.to(tl.pointer_type(tl.float32)) + scale_base // 4, scale)
 
 
@@ -163,16 +196,20 @@ def _qnorm_rope_kv_insert_int8_mla_kernel(
             nope_mask = dims < nope_dim
             absmax = tl.max(tl.where(nope_mask, tl.abs(x), 0.0), axis=0)
             scale = tl.maximum(absmax / 127.0, 1.0e-12)
-            quant = tl.clamp(x / scale, -127.0, 127.0).to(tl.int8)
+            quant = _round_to_int8(x / scale)
             block = slot // block_size
             pos = slot % block_size
             block_base = block * cache_block_stride
-            data_base = block_base + pos * 576
+            data_base = block_base + pos * _TOKEN_DATA_BYTES
             tl.store(cache + data_base + dims, quant, mask=nope_mask)
             rope_ptr = (cache + data_base + nope_dim).to(
                 tl.pointer_type(tl.bfloat16))
             tl.store(rope_ptr + rope_dims, kv_rotated)
-            scale_base = block_base + block_size * 576 + pos * 8
+            scale_base = (
+                block_base
+                + block_size * _TOKEN_DATA_BYTES
+                + pos * _SCALE_SLOT_BYTES
+            )
             tl.store(cache.to(tl.pointer_type(tl.float32)) + scale_base // 4,
                      scale)
 
@@ -207,13 +244,11 @@ def _gather_int8_indices_kernel(
     out,
     out_indices,
     item_offsets,
-    num_rows,
     item_offset,
     out_width,
     cache_block_size,
     cache_block_stride,
     has_item_offsets: tl.constexpr,
-    input_width: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -225,28 +260,33 @@ def _gather_int8_indices_kernel(
     ).to(tl.int64)
 
     dims = tl.arange(0, BLOCK)
-    dim_mask = valid & (dims < 512)
+    dim_mask = valid & (dims < _HEAD_DIM)
     cache_block = slot // cache_block_size
     cache_pos = slot % cache_block_size
     block_base = cache_block * cache_block_stride
-    data_base = block_base + cache_pos * 576
-    scale_base = block_base + cache_block_size * 576 + cache_pos * 8
+    data_base = block_base + cache_pos * _TOKEN_DATA_BYTES
+    scale_base = (
+        block_base
+        + cache_block_size * _TOKEN_DATA_BYTES
+        + cache_pos * _SCALE_SLOT_BYTES
+    )
     scale = tl.load(
         cache_f32 + scale_base // 4,
         mask=valid,
         other=0.0,
     )
-    nope = tl.load(cache_i8 + data_base + dims, mask=dim_mask & (dims < 448))
+    is_nope = dims < _NOPE_DIM
+    nope = tl.load(cache_i8 + data_base + dims, mask=dim_mask & is_nope)
     rope = tl.load(
-        cache_bf16 + data_base // 2 + 224 + (dims - 448),
-        mask=dim_mask & (dims >= 448),
+        cache_bf16 + data_base // 2 + _ROPE_BF16_OFFSET + (dims - _NOPE_DIM),
+        mask=dim_mask & ~is_nope,
     )
-    value = tl.where(dims < 448, nope.to(tl.float32) * scale, rope)
+    value = tl.where(is_nope, nope.to(tl.float32) * scale, rope)
     row_item_offset = (
         tl.load(item_offsets + row) if has_item_offsets else item_offset
     )
     output_item = row_item_offset + item
-    out_base = (row * out_width + output_item) * 512
+    out_base = (row * out_width + output_item) * _HEAD_DIM
     tl.store(out + out_base + dims, value, mask=dim_mask)
     tl.store(
         out_indices + row * out_width + output_item,
@@ -270,10 +310,9 @@ def gather_int8_cache_indices(
     item_offsets: torch.Tensor | None = None,
 ) -> None:
     """Gather sparse slots and dequantize them into a dense workspace."""
-    rows = indices.shape[0]
-    input_width = indices.shape[-1]
+    rows, width = indices.shape[0], indices.shape[-1]
     flat = cache.view(torch.uint8)
-    _gather_int8_indices_kernel[(rows, input_width)](
+    _gather_int8_indices_kernel[(rows, width)](
         flat.view(torch.int8),
         flat.view(torch.bfloat16),
         flat.view(torch.float32),
@@ -283,13 +322,11 @@ def gather_int8_cache_indices(
         out,
         out_indices,
         item_offsets,
-        rows,
         item_offset,
         out.shape[1],
         cache.shape[1],
         cache.stride(0),
         has_item_offsets=item_offsets is not None,
-        input_width=input_width,
         BLOCK=512,
         num_warps=4,
     )
@@ -330,20 +367,25 @@ def _gather_int8_paged_kernel(
             block_table + row * block_table_stride + logical_block,
         ).to(tl.int64)
         block_base = physical_block * cache_block_stride
-        data_base = block_base + block_offset * 576
-        scale_base = block_base + block_size * 576 + block_offset * 8
+        data_base = block_base + block_offset * _TOKEN_DATA_BYTES
+        scale_base = (
+            block_base
+            + block_size * _TOKEN_DATA_BYTES
+            + block_offset * _SCALE_SLOT_BYTES
+        )
         scale = tl.load(cache_f32 + scale_base // 4)
+        is_nope = dims < _NOPE_DIM
         nope = tl.load(
             cache_i8 + data_base + dims,
-            mask=dims < 448,
+            mask=is_nope,
             other=0,
         )
         rope = tl.load(
-            cache_bf16 + data_base // 2 + 224 + (dims - 448),
-            mask=dims >= 448,
+            cache_bf16 + data_base // 2 + _ROPE_BF16_OFFSET + (dims - _NOPE_DIM),
+            mask=~is_nope,
             other=0,
         )
-        value = tl.where(dims < 448, nope.to(tl.float32) * scale, rope)
+        value = tl.where(is_nope, nope.to(tl.float32) * scale, rope)
         out_base = row * out_stride0 + (offset + token) * out_stride1
         tl.store(out + out_base + dims, value)
 

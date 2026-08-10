@@ -18,6 +18,7 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm_fl.ops.deepseek_v4_int8_kv import (
+    INT8_TOKEN_PAGE_BYTES,
     dequantize_and_gather_int8_paged_cache,
     gather_int8_cache_indices,
     qnorm_rope_kv_insert_int8_mla,
@@ -104,10 +105,18 @@ logger = init_logger(__name__)
 _INT8_KV_DTYPE = "int8_per_token_head"
 
 
-if _INT8_KV_DTYPE not in DeepseekV4FlashMLASparseBackend.supported_kv_cache_dtypes:
-    DeepseekV4FlashMLASparseBackend.supported_kv_cache_dtypes.append(
-        _INT8_KV_DTYPE
-    )
+# NOTE: DeepseekV4FlashMLASparseBackend inherits (does not override)
+# ``supported_kv_cache_dtypes`` from FlashMLASparseBackend, so the two classes
+# share one list object. Assign a fresh list on the subclass instead of
+# appending, or V3.2's FlashMLASparseBackend would also claim INT8 support
+# without having the corresponding read/write path.
+if _INT8_KV_DTYPE not in DeepseekV4FlashMLASparseBackend.__dict__.get(
+    "supported_kv_cache_dtypes", ()
+):
+    DeepseekV4FlashMLASparseBackend.supported_kv_cache_dtypes = [
+        *DeepseekV4FlashMLASparseBackend.supported_kv_cache_dtypes,
+        _INT8_KV_DTYPE,
+    ]
 if not getattr(DeepseekV4FlashMLASparseBackend, "_fl_int8_shape", False):
     _original_v4_cache_shape = (
         DeepseekV4FlashMLASparseBackend.get_kv_cache_shape
@@ -122,7 +131,7 @@ if not getattr(DeepseekV4FlashMLASparseBackend, "_fl_int8_shape", False):
     ):
         if cache_dtype_str == _INT8_KV_DTYPE:
             # 448 INT8 NoPE + 64 BF16 RoPE + one FP32 scale + 4B padding.
-            return (num_blocks, block_size, 584)
+            return (num_blocks, block_size, INT8_TOKEN_PAGE_BYTES)
         return _original_v4_cache_shape(
             num_blocks,
             block_size,
@@ -147,7 +156,7 @@ if not getattr(DeepseekSparseSWABackend, "_fl_int8_shape", False):
         cache_dtype_str="auto",
     ):
         if cache_dtype_str == _INT8_KV_DTYPE:
-            return (num_blocks, block_size, 584)
+            return (num_blocks, block_size, INT8_TOKEN_PAGE_BYTES)
         return _original_swa_cache_shape(
             num_blocks,
             block_size,

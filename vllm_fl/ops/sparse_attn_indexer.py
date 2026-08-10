@@ -216,16 +216,13 @@ def _sparse_attn_indexer_dispatch_impl(
                 q_slice_cast = q_slice.view(torch.int8)
                 k_quant_cast = k_quant.view(torch.int8)
                 k_scale_cast = k_scale.view(torch.int32).squeeze(-1)
-            elif use_int8_cache:
-                q_slice_cast = q_slice
-                k_quant_cast = k_quant
-                k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
             else:
+                # FP8 and INT8 share this layout: values pass through unchanged
+                # and the scale workspace is reinterpreted as float32.
                 q_slice_cast = q_slice
                 k_quant_cast = k_quant
                 k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
-                
-            ### TODO(lms) replace
+
             if use_int8_cache:
                 logits = int8_mqa_logits(
                     q_slice_cast,
@@ -315,7 +312,6 @@ def _sparse_attn_indexer_dispatch_impl(
             else padded_q_quant_decode_tokens
         )
 
-        ### TODO(lms) replace
         if use_int8_cache:
             logits = int8_paged_mqa_logits(
                 padded_q_quant_decode_tokens,

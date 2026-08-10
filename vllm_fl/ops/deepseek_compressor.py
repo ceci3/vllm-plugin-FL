@@ -255,18 +255,37 @@ class DeepseekCompressor(nn.Module):
             vllm_config.compilation_config.static_forward_context
         )
 
+        # NOTE: the cache element format is chosen by the *cache* dtype, not by
+        # the weight quantization config — an INT-quantized checkpoint can still
+        # hold an FP8, MXFP4 or INT8 KV cache. The writer picked here must match
+        # what the reader in deepseek_v4_attention.py expects, otherwise the
+        # cached bytes get reinterpreted under the wrong encoding (silently, as
+        # all layouts share the same 584B page geometry).
         if self.quant_config is not None:
             if self.head_dim == 512:
                 assert not use_fp4_cache, (
                     "MXFP4 cache is only supported for indexer (head=128)"
                 )
-                self._fused_kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
+                # INT8 shares the FP8 page geometry (576B data + 8B scale slot);
+                # only the NoPE encoding and the scale semantics differ.
+                self._fused_kernel = (
+                    fused_compress_rope_int8_mla_cache_kernel
+                    if self.use_int8_kv_cache
+                    else _fused_kv_compress_norm_rope_insert_sparse_attn
+                )
                 self._quant_block = 64
                 self._token_stride = self.nope_head_dim + self.rope_head_dim * 2
                 self._scale_dim = self.nope_head_dim // 64 + 1  # 7 real + 1 pad
                 self._num_warps = 4
             elif self.head_dim == 128:
-                if use_fp4_cache:
+                if self.use_int8_indexer_cache:
+                    self._fused_kernel = (
+                        fused_compress_rope_int8_indexer_cache_kernel
+                    )
+                    self._quant_block = 128
+                    self._token_stride = self.head_dim
+                    self._scale_dim = 4  # single float32 scale
+                elif use_fp4_cache:
                     self._fused_kernel = (
                         _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn
                     )
@@ -279,6 +298,10 @@ class DeepseekCompressor(nn.Module):
                     self._token_stride = self.head_dim
                     self._scale_dim = 4  # single float32 scale
                 self._num_warps = 1
+            else:
+                raise ValueError(
+                    f"Unsupported head_dim for fused quant+cache: {self.head_dim}"
+                )
         else:
             ### USE BF16 KERNELS
             if self.head_dim == 512:
@@ -289,9 +312,13 @@ class DeepseekCompressor(nn.Module):
                 self._fused_kernel = _fused_kv_compress_norm_rope_insert_indexer_attn_bf16
                 self._token_stride = self.head_dim * 2
                 self._num_warps = 1
+            else:
+                raise ValueError(
+                    f"Unsupported head_dim for fused bf16 cache: {self.head_dim}"
+                )
             self._scale_dim = None
             self._quant_block = None
-            
+
     def forward(
         self,
         # [num_tokens, 2 * self.coff * self.head_dim]

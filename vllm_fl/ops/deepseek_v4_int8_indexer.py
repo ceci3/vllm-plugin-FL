@@ -7,6 +7,22 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
+def _round_to_int8(x):
+    """Symmetric round-half-away-from-zero, then clamp to the INT8 range.
+
+    ``x.to(tl.int8)`` truncates toward zero, which biases every quantized
+    magnitude downward by up to a full LSB instead of half of one. Adding the
+    signed 0.5 offset before the cast recovers round-to-nearest; ``tl.clamp``
+    runs afterwards so the offset itself cannot push a value out of range.
+    Written with plain arithmetic rather than libdevice ``rint`` to stay
+    portable across the vendor backends this plugin targets.
+    """
+    return tl.clamp(
+        x + tl.where(x >= 0, 0.5, -0.5), -127.0, 127.0
+    ).to(tl.int8)
+
+
+@triton.jit
 def fused_compress_rope_int8_indexer_cache_kernel(
     state_cache,
     state_stride_block,
@@ -110,7 +126,7 @@ def fused_compress_rope_int8_indexer_cache_kernel(
 
     absmax = tl.maximum(tl.max(tl.abs(result), axis=0), 1.0e-4)
     scale = absmax / 127.0
-    quant = tl.clamp(result / scale, -127.0, 127.0).to(tl.int8)
+    quant = _round_to_int8(result / scale)
 
     kv_block = kv_slot // kv_block_size
     kv_pos = kv_slot % kv_block_size
@@ -170,7 +186,7 @@ def _indexer_q_rope_int8_kernel(
 
     absmax = tl.maximum(tl.max(tl.abs(x), axis=0), 1.0e-4)
     scale = absmax / 127.0
-    quant = tl.clamp(x / scale, -127.0, 127.0).to(tl.int8)
+    quant = _round_to_int8(x / scale)
     out_base = q_int8 + token * q_int8_stride_t + head * q_int8_stride_h
     tl.store(out_base + offsets, quant)
 
@@ -478,6 +494,8 @@ def _int8_paged_mqa_logits_h64_d128_kernel(
     cache_block_stride,
     weights,
     context_lens,
+    context_row_stride,
+    context_col_stride,
     block_table,
     block_table_stride,
     logits,
@@ -494,7 +512,13 @@ def _int8_paged_mqa_logits_h64_d128_kernel(
     logical_block = tl.program_id(1)
     batch = row // NEXT_N
     next_idx = row % NEXT_N
-    context_len = tl.load(context_lens + batch * NEXT_N + next_idx)
+    # Strides come from the caller: a compact (B, 1) ``context_lens`` passes a
+    # zero column stride so the shared length broadcasts across next_n.
+    context_len = tl.load(
+        context_lens
+        + batch * context_row_stride
+        + next_idx * context_col_stride
+    )
     key_start = logical_block * 64
     if key_start >= context_len:
         return
@@ -554,7 +578,8 @@ def _int8_paged_mqa_logits_kernel(
     weights,
     weights_stride,
     context_lens,
-    context_stride,
+    context_row_stride,
+    context_col_stride,
     block_table,
     block_table_stride,
     logits,
@@ -570,7 +595,13 @@ def _int8_paged_mqa_logits_kernel(
     key_block = tl.program_id(1)
     batch = row // NEXT_N
     next_idx = row % NEXT_N
-    context_len = tl.load(context_lens + batch * context_stride + next_idx)
+    # See int8_paged_mqa_logits: a compact (B, 1) ``context_lens`` passes a zero
+    # column stride so the shared length broadcasts across next_n positions.
+    context_len = tl.load(
+        context_lens
+        + batch * context_row_stride
+        + next_idx * context_col_stride
+    )
 
     # The logits buffer is deliberately not cleaned: the downstream top-k
     # kernel is length-masked.  Decode allocates it at max_model_len, which can
@@ -652,6 +683,19 @@ def int8_paged_mqa_logits(
         (batch * next_n, max_model_len), dtype=torch.float32, device=q.device
     )
     flat = cache.view(torch.uint8)
+
+    # ``context_lens`` is (B, next_n) under native spec decode but (B, 1)
+    # otherwise. The kernels index it as ``batch * row_stride + next_idx``, so a
+    # compact single-column tensor must advertise a zero column stride to
+    # broadcast the shared length across the next_n speculative positions --
+    # taking stride(0) alone would walk into the following request's entry.
+    context_row_stride = context_lens.stride(0)
+    if context_lens.dim() > 1 and context_lens.shape[1] == 1:
+        context_col_stride = 0
+    elif context_lens.dim() == 1:
+        context_row_stride, context_col_stride = context_lens.stride(0), 0
+    else:
+        context_col_stride = context_lens.stride(1)
     if (
         num_heads == 64
         and head_dim == 128
@@ -673,6 +717,8 @@ def int8_paged_mqa_logits(
             cache.stride(0),
             weights,
             context_lens,
+            context_row_stride,
+            context_col_stride,
             block_table,
             block_table.stride(0),
             logits,
@@ -696,7 +742,8 @@ def int8_paged_mqa_logits(
         weights,
         weights.stride(0),
         context_lens,
-        context_lens.stride(0),
+        context_row_stride,
+        context_col_stride,
         block_table,
         block_table.stride(0),
         logits,
