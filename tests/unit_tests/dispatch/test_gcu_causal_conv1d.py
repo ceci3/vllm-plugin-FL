@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 from vllm_fl.dispatch.backends.vendor.gcu.impl import causal_conv1d
+from vllm_fl.patches.triton_kernel import KernelLaunchMetaProxy
 
 
 class _FakeKernel:
@@ -15,15 +16,12 @@ class _FakeKernel:
         return launch
 
 
-def test_block_n_kernel_proxy_overrides_launch_meta():
-    proxy = causal_conv1d._BlockNKernelProxy(_FakeKernel(), block_n=2048)
-
-    grid, args, kwargs = proxy["grid"](1, BLOCK_N=256, other=True)
-
-    assert grid == "grid"
-    assert args == (1,)
-    assert kwargs == {"BLOCK_N": 2048, "other": True}
-    assert proxy.marker == "wrapped"
+def test_gcu_causal_conv1d_launch_configs():
+    assert causal_conv1d.CAUSAL_CONV1D_FWD_CONFIG == {
+        "BLOCK_N": 2048,
+        "num_stages": 2,
+    }
+    assert causal_conv1d.CAUSAL_CONV1D_UPDATE_CONFIG == {"BLOCK_N": 1024}
 
 
 def test_apply_causal_conv1d_gcu_patch_is_idempotent(monkeypatch):
@@ -40,5 +38,10 @@ def test_apply_causal_conv1d_gcu_patch_is_idempotent(monkeypatch):
 
     assert module._causal_conv1d_fwd_kernel is fwd_proxy
     assert module._causal_conv1d_update_kernel is update_proxy
-    assert fwd_proxy.block_n == 2048
-    assert update_proxy.block_n == 1024
+    assert isinstance(fwd_proxy, KernelLaunchMetaProxy)
+    assert isinstance(update_proxy, KernelLaunchMetaProxy)
+    assert fwd_proxy.launch_overrides == {
+        "BLOCK_N": 2048,
+        "num_stages": 2,
+    }
+    assert update_proxy.launch_overrides == {"BLOCK_N": 1024}

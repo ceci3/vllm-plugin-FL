@@ -402,7 +402,7 @@ class PlatformFL(Platform):
         # Current detection reports vendor_name="enflame" and
         # device_type="gcu". Keep the legacy "gcu" vendor alias for images
         # built with the earlier detector.
-        if cls.vendor_name in [
+        if cls.vendor_name in {
             "nvidia",
             "ascend",
             "metax",
@@ -413,7 +413,7 @@ class PlatformFL(Platform):
             "gcu",
             "enflame",
             "kunlunxin",
-        ]:
+        }:
             return True
         return False
 
