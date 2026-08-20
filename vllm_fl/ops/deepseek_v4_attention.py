@@ -5,12 +5,16 @@ DeepseekV4 MLA Attention Layer
 """
 
 from collections.abc import Callable
+import copy
 from dataclasses import dataclass
+import json
+import os
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from flag_gems.fused import fused_deepseek_v4_qnorm_rope_kv_rope_insert
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm.envs as envs
@@ -21,14 +25,17 @@ from vllm_fl.ops.deepseek_v4_int8_kv import (
     INT8_TOKEN_PAGE_BYTES,
     dequantize_and_gather_int8_paged_cache,
     gather_int8_cache_indices,
+    gather_two_int8_cache_indices,
     qnorm_rope_kv_insert_int8_mla,
 )
 from vllm_fl.ops.deepseek_v4_int8_indexer import (
     fused_indexer_q_rope_quant_int8,
 )
+from vllm_fl.ops.deepseek_v4_int8_woa import fused_inv_rope_quant_int8
 from vllm_fl.ops.sparse_attn_indexer import (
     SparseAttnIndexerFL,
 )
+from vllm_fl.ops.sparse_attn_indexer_bf16 import SparseAttnIndexerBF16
 from vllm.model_executor.layers.utils import cublas_gemm_bf16_bf16_fp32
 from vllm_fl.dispatch import CachedOp
 
@@ -43,10 +50,13 @@ _compute_global_topk_indices_and_lens = CachedOp(
 )
 _flash_mla_with_kvcache = CachedOp("flash_mla_with_kvcache")
 _dequantize_and_gather_k_cache = CachedOp("dequantize_and_gather_k_cache")
+_gather_k_cache = CachedOp("gather_k_cache")
 _combine_topk_swa_indices = CachedOp("combine_topk_swa_indices")
 _flash_mla_sparse_fwd = CachedOp("flash_mla_sparse_fwd")
 _fused_indexer_q_rope_quant = CachedOp("fused_indexer_q_rope_quant")
+_fused_indexer_q_rope = CachedOp("fused_indexer_q_rope")
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import get_dtype_size
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -92,7 +102,11 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWABackend,
     DeepseekV4SWACache,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 from vllm.model_executor.layers.deepseek_v4_attention import (
     DeepseekV4MultiHeadLatentAttentionWrapper,
@@ -103,6 +117,46 @@ from vllm.model_executor.layers.deepseek_v4_attention import (
 logger = init_logger(__name__)
 
 _INT8_KV_DTYPE = "int8_per_token_head"
+_INT8_KV_DTYPES = (_INT8_KV_DTYPE,)
+
+
+def _int8_layer_range_contains(prefix: str) -> bool:
+    layer_list = os.getenv("VLLM_DSV4_INT8_ATTN_LAYERS")
+    value = os.getenv("VLLM_DSV4_INT8_ATTN_LAYER_RANGE")
+    if ".layers." not in prefix:
+        return True
+    layer = int(prefix.split(".layers.", 1)[1].split(".", 1)[0])
+    if layer_list:
+        return layer in {
+            int(item) for item in layer_list.split(",") if item.strip()
+        }
+    if not value:
+        return True
+    start_text, end_text = value.split(":", 1)
+    return int(start_text) <= layer <= int(end_text)
+
+
+def _install_int8_block_page_size(spec_cls) -> None:
+    """Teach both installed and source vLLM specs about the 608-byte page."""
+    marker = "_fl_int8_block_page_size"
+    if getattr(spec_cls, marker, False):
+        return
+    original = spec_cls.real_page_size_bytes.fget
+
+    def real_page_size_bytes(self):
+        if (
+            self.model_version == "deepseek_v4"
+            and self.cache_dtype_str in _INT8_KV_DTYPES
+        ):
+            return self.storage_block_size * INT8_TOKEN_PAGE_BYTES
+        return original(self)
+
+    spec_cls.real_page_size_bytes = property(real_page_size_bytes)
+    setattr(spec_cls, marker, True)
+
+
+_install_int8_block_page_size(MLAAttentionSpec)
+_install_int8_block_page_size(SlidingWindowMLASpec)
 
 
 # NOTE: DeepseekV4FlashMLASparseBackend inherits (does not override)
@@ -115,7 +169,7 @@ if _INT8_KV_DTYPE not in DeepseekV4FlashMLASparseBackend.__dict__.get(
 ):
     DeepseekV4FlashMLASparseBackend.supported_kv_cache_dtypes = [
         *DeepseekV4FlashMLASparseBackend.supported_kv_cache_dtypes,
-        _INT8_KV_DTYPE,
+        *_INT8_KV_DTYPES,
     ]
 if not getattr(DeepseekV4FlashMLASparseBackend, "_fl_int8_shape", False):
     _original_v4_cache_shape = (
@@ -129,9 +183,11 @@ if not getattr(DeepseekV4FlashMLASparseBackend, "_fl_int8_shape", False):
         head_size,
         cache_dtype_str="auto",
     ):
-        if cache_dtype_str == _INT8_KV_DTYPE:
-            # 448 INT8 NoPE + 64 BF16 RoPE + one FP32 scale + 4B padding.
+        if cache_dtype_str in _INT8_KV_DTYPES:
+            # 448 INT8 NoPE + 64 BF16 RoPE + seven FP32 scales + padding.
             return (num_blocks, block_size, INT8_TOKEN_PAGE_BYTES)
+        if cache_dtype_str.startswith("fp8"):
+            cache_dtype_str = "fp8_ds_mla"
         return _original_v4_cache_shape(
             num_blocks,
             block_size,
@@ -155,8 +211,10 @@ if not getattr(DeepseekSparseSWABackend, "_fl_int8_shape", False):
         head_size,
         cache_dtype_str="auto",
     ):
-        if cache_dtype_str == _INT8_KV_DTYPE:
+        if cache_dtype_str in _INT8_KV_DTYPES:
             return (num_blocks, block_size, INT8_TOKEN_PAGE_BYTES)
+        if cache_dtype_str.startswith("fp8"):
+            cache_dtype_str = "fp8_ds_mla"
         return _original_swa_cache_shape(
             num_blocks,
             block_size,
@@ -213,7 +271,23 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
         requested_cache_dtype = (
             cache_config.cache_dtype if cache_config is not None else None
         )
-        if requested_cache_dtype == _INT8_KV_DTYPE:
+        layer_mode = os.getenv("VLLM_DSV4_INT8_ATTN_LAYER_MODE")
+        layer_is_compressed = (compress_ratio or 1) > 1
+        if requested_cache_dtype in _INT8_KV_DTYPES:
+            if not _int8_layer_range_contains(prefix):
+                requested_cache_dtype = "fp8"
+            if layer_mode == "swa_only" and layer_is_compressed:
+                requested_cache_dtype = "fp8"
+            elif layer_mode == "compressed" and not layer_is_compressed:
+                requested_cache_dtype = "fp8"
+        if cache_config is not None:
+            cache_config = copy.copy(cache_config)
+            cache_config.cache_dtype = requested_cache_dtype
+        replace_upstream_placeholder = (
+            requested_cache_dtype in _INT8_KV_DTYPES
+            or requested_cache_dtype in ("bf16", "bfloat16")
+        )
+        if replace_upstream_placeholder:
             # The upstream wrapper constructs an FP8-only MLA placeholder.
             # This plugin deletes and replaces it immediately below.
             # Use its canonical format directly so the discarded placeholder
@@ -239,14 +313,40 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
                 prefix,
             )
         finally:
-            if requested_cache_dtype == _INT8_KV_DTYPE:
+            if replace_upstream_placeholder:
                 cache_config.cache_dtype = requested_cache_dtype
+        mixed_main_int8 = (
+            os.getenv("VLLM_DSV4_MIXED_MAIN_INT8", "0") == "1"
+        )
+        if mixed_main_int8:
+            swa_cache_config = copy.copy(self.swa_cache_layer.cache_config)
+            swa_cache_config.cache_dtype = "fp8_ds_mla"
+            self.swa_cache_layer.cache_config = swa_cache_config
+        use_bf16_kv_cache = requested_cache_dtype in ("bf16", "bfloat16")
+        if use_bf16_kv_cache:
+            # The upstream quantized wrapper always creates an UINT8 SWA cache.
+            # Replace it with the native BF16 layout while retaining all
+            # quantized projection/GEMM modules owned by this wrapper.
+            swa_prefix = self.swa_cache_layer.prefix
+            compilation_config = mla_modules.vllm_config.compilation_config
+            compilation_config.static_forward_context.pop(swa_prefix, None)
+            self.swa_cache_layer = DeepseekV4SWACache(
+                head_dim=self.head_dim,
+                window_size=self.window_size,
+                dtype=torch.bfloat16,
+                prefix=swa_prefix,
+                cache_config=cache_config,
+            )
         # TODO(yifan): currently hardcoded for FP8 sparse, make it more generic
         head_bytes = (
-            self.nope_head_dim  # 448 fp8 NoPE
-            + self.rope_head_dim * 2  # 64 bf16 RoPE
-            + self.nope_head_dim // 64  # 7B scale factors
-            + 1  # 1B pad
+            self.head_dim * get_dtype_size(torch.bfloat16)
+            if use_bf16_kv_cache
+            else (
+                self.nope_head_dim  # 448 fp8 NoPE
+                + self.rope_head_dim * 2  # 64 bf16 RoPE
+                + self.nope_head_dim // 64  # 7B scale factors
+                + 1  # 1B pad
+            )
         )
         del self.mla_attn
 
@@ -269,7 +369,9 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
             indexer=self.indexer,
             topk_indices_buffer=self.topk_indices_buffer,
         )
-        if requested_cache_dtype == _INT8_KV_DTYPE and self.compressor is not None:
+        if (
+            requested_cache_dtype in _INT8_KV_DTYPES or use_bf16_kv_cache
+        ) and self.compressor is not None:
             compilation_config = mla_modules.vllm_config.compilation_config
             compilation_config.static_forward_context.pop(
                 self.compressor.state_cache.prefix,
@@ -284,7 +386,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
                 prefix=f"{prefix}.compressor",
                 k_cache_prefix=self.mla_attn.prefix,
             )
-        self.use_int8_kv_cache = requested_cache_dtype == _INT8_KV_DTYPE
+        self.use_int8_kv_cache = requested_cache_dtype in _INT8_KV_DTYPES
         # Register this layer in the compilation config's static forward context
         # This allows the custom op to retrieve the layer during execution
         compilation_config = mla_modules.vllm_config.compilation_config
@@ -328,32 +430,57 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
             # INT W8A8/W8A16 compressed-tensors layers must use their own
             # quantized Linear method. The FP8 path performs inverse RoPE as
             # part of fused_inv_rope_fp8_quant; do the same in BF16 first.
-            cos_sin = self.rotary_emb.cos_sin_cache.index_select(0, positions)
-            half_rope = self.rope_head_dim // 2
-            cos = cos_sin[:, :half_rope].to(o.dtype).unsqueeze(1)
-            sin = cos_sin[:, half_rope:self.rope_head_dim].to(
-                o.dtype
-            ).unsqueeze(1)
-            rope = o[..., self.nope_head_dim:]
-            rope_even = rope[..., 0::2]
-            rope_odd = rope[..., 1::2]
-            inv_rope = torch.stack(
-                (
-                    rope_even * cos + rope_odd * sin,
-                    rope_odd * cos - rope_even * sin,
-                ),
-                dim=-1,
-            ).flatten(-2)
-            o_unrotated = torch.cat(
-                (o[..., :self.nope_head_dim], inv_rope), dim=-1
+            scheme = getattr(self.wo_a, "scheme", None)
+            is_dynamic_symmetric_w8a8 = (
+                scheme is not None
+                and scheme.__class__.__name__ == "CompressedTensorsW8A8Int8"
+                and getattr(self.wo_a, "input_scale", None) is None
+                and getattr(self.wo_a, "azp_adj", None) is None
+                and hasattr(self.wo_a, "weight")
+                and self.wo_a.weight.dtype == torch.int8
+                and hasattr(self.wo_a, "_wo_a_grouped_weight")
+                and hasattr(self.wo_a, "_wo_a_grouped_weight_scale")
+            )
+            if is_dynamic_symmetric_w8a8:
+                from vllm import _custom_ops as ops
+
+                o_q, o_scale = fused_inv_rope_quant_int8(
+                    o, positions, self.rotary_emb.cos_sin_cache,
+                    self.n_local_groups,
+                    self.n_local_heads // self.n_local_groups,
+                    self.nope_head_dim, self.rope_head_dim,
+                )
+                outputs = []
+                for group_idx in range(self.n_local_groups):
+                    weight = self.wo_a._wo_a_grouped_weight[
+                        group_idx
+                    ].transpose(0, 1)
+                    weight_scale = (
+                        self.wo_a._wo_a_grouped_weight_scale[group_idx]
+                    )
+                    outputs.append(ops.cutlass_scaled_mm(
+                        o_q[group_idx], weight,
+                        scale_a=o_scale[group_idx], scale_b=weight_scale,
+                        out_dtype=o.dtype,
+                    ))
+                z = torch.stack(outputs, dim=1)
+                return self.wo_b(z.flatten(1))
+
+            # Other compressed-tensors formats keep their native GEMM, but
+            # still use the single-kernel inverse-RoPE implementation.
+            from vllm_fl.dispatch.backends.vendor.cuda.impl.deepseek_v4_ops.fused_inv_rope import (  # noqa: E501
+                fused_inv_rope,
+            )
+            o_grouped = fused_inv_rope(
+                o, positions, self.rotary_emb.cos_sin_cache,
+                self.n_local_groups,
+                self.n_local_heads // self.n_local_groups,
+                self.nope_head_dim, self.rope_head_dim,
             )
 
             # Apply the INT quantized linear kernel to all local group inputs in
             # one batch, then select the matching output block for each group.
             # This is equivalent to the grouped einsum below.
-            o_grouped = o_unrotated.reshape(
-                num_tokens, self.n_local_groups, -1
-            )
             z_all = self.wo_a(o_grouped)
             if isinstance(z_all, tuple):
                 z_all = z_all[0]
@@ -409,7 +536,69 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
         # is the fan-out start event; ln_events[1..3] are per-aux done events.
         aux_fns: list[Callable[[], Any] | None] = [None, None, None]
 
-        if self.compressor is not None:
+        # The main Q/KV projection and indexer weight projection consume the
+        # exact same activation.  Dynamic W8A8 normally quantizes it once per
+        # Linear.  Quantize before stream fan-out and let both GEMMs reuse the
+        # result when their layouts support the direct scaled-MM path.
+        shared_int8: tuple[torch.Tensor, torch.Tensor] | None = None
+        if self.indexer is not None:
+            shared_layers = (self.fused_wqa_wkv, self.indexer.weights_proj)
+            can_share = all(
+                getattr(getattr(layer, "scheme", None), "__class__", type(None))
+                .__name__ == "CompressedTensorsW8A8Int8"
+                and getattr(layer, "input_scale", None) is None
+                and getattr(layer, "azp_adj", None) is None
+                and hasattr(layer, "weight")
+                and layer.weight.dtype == torch.int8
+                for layer in shared_layers
+            )
+            if can_share:
+                from vllm import _custom_ops as ops
+
+                hidden_q, hidden_scale, _ = ops.scaled_int8_quant(
+                    hidden_states.contiguous(), None, None, symmetric=True
+                )
+                shared_int8 = hidden_q, hidden_scale
+
+        def shared_w8a8_linear(layer: torch.nn.Module) -> torch.Tensor:
+            assert shared_int8 is not None
+            from vllm import _custom_ops as ops
+
+            hidden_q, hidden_scale = shared_int8
+            return ops.cutlass_scaled_mm(
+                hidden_q, layer.weight, scale_a=hidden_scale,
+                scale_b=layer.weight_scale, out_dtype=hidden_states.dtype,
+            )
+
+        combine_compressor_gemms = (
+            self.compressor is not None and self.indexer is not None
+        )
+        compressor_width = 0
+        if combine_compressor_gemms:
+            assert self.compressor is not None
+            assert self.indexer is not None
+            compressor_width = self.compressor.fused_wkv_wgate.weight.shape[0]
+            if not hasattr(self, "_combined_compressor_weight"):
+                self.register_buffer(
+                    "_combined_compressor_weight",
+                    torch.cat(
+                        (
+                            self.compressor.fused_wkv_wgate.weight,
+                            self.indexer.compressor.fused_wkv_wgate.weight,
+                        ),
+                        dim=0,
+                    ).contiguous(),
+                    persistent=False,
+                )
+
+            def combined_compressor_kv_score() -> torch.Tensor:
+                return cublas_gemm_bf16_bf16_fp32(
+                    hidden_states, self._combined_compressor_weight
+                )
+
+            aux_fns[0] = combined_compressor_kv_score
+
+        if self.compressor is not None and not combine_compressor_gemms:
             # Local ref so the closure keeps a non-None type for mypy.
             compressor = self.compressor
 
@@ -425,6 +614,8 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
 
             def indexer_weights_proj() -> torch.Tensor:
                 # ReplicatedLinear returns (output, bias); bias is None.
+                if shared_int8 is not None:
+                    return shared_w8a8_linear(indexer.weights_proj)
                 weights, _ = indexer.weights_proj(hidden_states)
                 return weights
 
@@ -434,28 +625,50 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
                 )
 
             aux_fns[1] = indexer_weights_proj
-            aux_fns[2] = indexer_compressor_kv_score
+            if not combine_compressor_gemms:
+                aux_fns[2] = indexer_compressor_kv_score
 
         def fused_wqa_wkv() -> torch.Tensor:
             # MergedColumnParallelLinear returns (output, bias); bias is None.
+            if shared_int8 is not None:
+                return shared_w8a8_linear(self.fused_wqa_wkv)
             qr_kv, _ = self.fused_wqa_wkv(hidden_states)
             return qr_kv
 
+        disable_aux_streams = os.getenv("VLLM_DSV4_DISABLE_AUX_STREAMS", "0") == "1"
         if execute_in_parallel:
-             qr_kv, (kv_score, indexer_weights, indexer_kv_score) = execute_in_parallel(
+             qr_kv, aux_results = execute_in_parallel(
                  fused_wqa_wkv,
                  aux_fns,
                  self.ln_events[0],
                  self.ln_events[1:4],
-                 self.aux_stream_list[:3],
+                 None if disable_aux_streams else self.aux_stream_list[:3],
                  enable=hidden_states.shape[0]
                  <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD,
              )
+             kv_score, indexer_weights, indexer_kv_score = aux_results
         else:
             qr_kv, _ = self.fused_wqa_wkv(hidden_states)
-            kv_score = compressor_kv_score() if self.compressor is not None else None
+            kv_score = (
+                combined_compressor_kv_score()
+                if combine_compressor_gemms
+                else compressor_kv_score() if self.compressor is not None else None
+            )
             indexer_weights = indexer_weights_proj() if self.indexer is not None else None
-            indexer_kv_score = indexer_compressor_kv_score() if self.indexer is not None else None
+            indexer_kv_score = (
+                None
+                if combine_compressor_gemms
+                else indexer_compressor_kv_score()
+                if self.indexer is not None
+                else None
+            )
+
+        if combine_compressor_gemms:
+            assert kv_score is not None
+            kv_score, indexer_kv_score = kv_score.split(
+                [compressor_width, kv_score.shape[-1] - compressor_width],
+                dim=-1,
+            )
 
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
@@ -511,7 +724,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
                 ),
                 self.ln_events[0],
                 self.ln_events[1],
-                aux_stream,
+                None if os.getenv("VLLM_DSV4_DISABLE_AUX_STREAMS", "0") == "1" else aux_stream,
             )
         elif self.compressor is not None:
             # wq_b + kv_insert on default, compressor on aux.
@@ -529,7 +742,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
                 lambda: compressor(kv_score, positions, self.rotary_emb),
                 self.ln_events[0],
                 self.ln_events[1],
-                aux_stream,
+                None if os.getenv("VLLM_DSV4_DISABLE_AUX_STREAMS", "0") == "1" else aux_stream,
             )
         else:
             # SWA-only layer: no compressor, no overlap.
@@ -589,7 +802,21 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
         #   Q side:  q_head_norm (per-head RMSNorm, no weight) + GPT-J RoPE
         #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert
         # kv is unchanged; mla_attn reads kv solely via swa_kv_cache.
-        if self.use_int8_kv_cache:
+        if self.mla_attn.use_bf16_kv_cache:
+            fused_deepseek_v4_qnorm_rope_kv_rope_insert(
+                q,
+                kv,
+                swa_kv_cache,
+                swa_metadata.slot_mapping,
+                positions,
+                self.rotary_emb.cos_sin_cache,
+                self.eps,
+                swa_metadata.block_size,
+            )
+        elif (
+            self.use_int8_kv_cache
+            and not self.mla_attn.swa_official_fp8
+        ):
             qnorm_rope_kv_insert_int8_mla(
                 q,
                 kv,
@@ -599,6 +826,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
                 self.rotary_emb.cos_sin_cache,
                 self.eps,
                 swa_metadata.block_size,
+                store_fp8=self.mla_attn.swa_kv_fp8_override,
             )
         else:
             _fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
@@ -718,9 +946,10 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
         assert (
             kv_cache_dtype.startswith("fp8")
-            or kv_cache_dtype == _INT8_KV_DTYPE
+            or kv_cache_dtype in _INT8_KV_DTYPES
+            or kv_cache_dtype in ("bf16", "bfloat16")
         ), (
-            f"DeepseekV4 only supports fp8 or per-token-head INT8 KV cache, "
+            f"DeepseekV4 only supports bf16, fp8 or per-token-head INT8 KV cache, "
             f"got {kv_cache_dtype}"
         )
         assert issubclass(self.get_attn_backend(), FlashMLASparseBackend), (
@@ -739,16 +968,39 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             logger.info_once("Using DeepSeek's fp8_ds_mla KV cache format.")
 
         self.kv_cache_dtype = kv_cache_dtype
-        self.use_int8_kv_cache = kv_cache_dtype == _INT8_KV_DTYPE
+        self.use_int8_kv_cache = kv_cache_dtype in _INT8_KV_DTYPES
+        self.use_bf16_kv_cache = kv_cache_dtype in ("bf16", "bfloat16")
+        skip_layers = {
+            int(value) for value in os.getenv(
+                "VLLM_DSV4_INT8_KV_SKIP_LAYERS", ""
+            ).split(",") if value.strip()
+        }
+        current_layer = (
+            int(prefix.split(".layers.", 1)[1].split(".", 1)[0])
+            if ".layers." in prefix else -1
+        )
+        self.main_kv_fp8_override = (
+            self.use_int8_kv_cache and current_layer in skip_layers
+        )
+        self.swa_kv_fp8_override = self.main_kv_fp8_override
+        self.swa_official_fp8 = (
+            os.getenv("VLLM_DSV4_MIXED_MAIN_INT8", "0") == "1"
+        )
+        self._int8_attn_diag_done = False
+        self._int8_prefill_diag_done = False
         if self.use_int8_kv_cache:
             logger.info_once(
-                "Using INT8 per-token-head DeepSeek-V4 KV cache storage with "
-                "BF16 attention compute."
+                "Using INT8 per-64-channel-block DeepSeek-V4 KV cache "
+                "storage with BF16 attention compute."
             )
         self._gather_paged_cache = (
             dequantize_and_gather_int8_paged_cache
             if self.use_int8_kv_cache
-            else _dequantize_and_gather_k_cache
+            else (
+                _gather_k_cache
+                if self.use_bf16_kv_cache
+                else _dequantize_and_gather_k_cache
+            )
         )
 
         # Register with compilation context for metadata lookup
@@ -769,21 +1021,20 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             self.compress_ratio <= 1
         ):  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
-        storage_dtype = (
-            "fp8_ds_mla"
-            if self.kv_cache_dtype == _INT8_KV_DTYPE
-            else self.kv_cache_dtype
-        )
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
-            dtype=torch.uint8,
+            dtype=(torch.bfloat16 if self.use_bf16_kv_cache else torch.uint8),
             compress_ratio=self.compress_ratio,
-            # Reuse the upstream DeepSeek-V4 584-byte physical page sizing.
+            # Reuse upstream construction, then dispatch with the INT8 dtype.
             # Runtime dispatch continues to use self.kv_cache_dtype (INT8).
-            cache_dtype_str=storage_dtype,
-            alignment=576,  # NOTE: FlashMLA requires 576B alignment
+            cache_dtype_str=self.kv_cache_dtype,
+            alignment=(
+                self.head_dim * get_dtype_size(torch.bfloat16)
+                if self.use_bf16_kv_cache
+                else 576
+            ),
             model_version="deepseek_v4",
         )
 
@@ -904,30 +1155,128 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             )
             if extra_width:
                 assert kv_cache is not None
-                gather_int8_cache_indices(
+                gather_two_int8_cache_indices(
                     kv_cache,
                     main_indices,
                     main_lens,
+                    self.swa_cache_layer.kv_cache,
+                    swa_indices,
+                    swa_lens,
                     workspace,
                     local_indices,
+                    cache0_fp8=self.main_kv_fp8_override,
+                    cache1_fp8=self.swa_kv_fp8_override,
+                    cache1_official_fp8=self.swa_official_fp8,
                 )
-            gather_int8_cache_indices(
-                self.swa_cache_layer.kv_cache,
-                swa_indices,
-                swa_lens,
-                workspace,
-                local_indices,
-                item_offsets=main_lens,
-            )
-            _flash_mla_sparse_fwd(
-                q=q,
-                kv=workspace.view(-1, 1, self.head_dim),
-                indices=local_indices.unsqueeze(1),
-                sm_scale=self.scale,
-                attn_sink=self.attn_sink,
-                topk_length=main_lens + swa_lens,
-                out=output,
-            )
+            else:
+                gather_int8_cache_indices(
+                    self.swa_cache_layer.kv_cache,
+                    swa_indices,
+                    swa_lens,
+                    workspace,
+                    local_indices,
+                    item_offsets=main_lens,
+                    fp8_cache=self.swa_kv_fp8_override,
+                    official_fp8_cache=self.swa_official_fp8,
+                )
+            # Mixed official-FP8/INT8 layers cannot share FlashMLA decode
+            # scheduler metadata: the official cache uses 64-token pages,
+            # whereas this gathered BF16 workspace is one dense page per
+            # request.  Run only the selected INT8 layers through sparse MLA;
+            # the remaining official-FP8 layers retain their normal decode
+            # path and scheduler.
+            if self.swa_official_fp8:
+                _flash_mla_sparse_fwd(
+                    q=q,
+                    kv=workspace.view(-1, 1, self.head_dim),
+                    indices=local_indices.unsqueeze(1),
+                    sm_scale=self.scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=main_lens + swa_lens,
+                    out=output,
+                )
+            else:
+                if self.compress_ratio <= 1:
+                    tile_metadata = swa_metadata.tile_sched_swaonly
+                elif self.compress_ratio == 4:
+                    tile_metadata = swa_metadata.tile_sched_c4a
+                elif self.compress_ratio == 128:
+                    tile_metadata = swa_metadata.tile_sched_c128a
+                else:
+                    raise ValueError(
+                        f"Unsupported compress_ratio={self.compress_ratio}"
+                    )
+                assert tile_metadata is not None
+                _flash_mla_with_kvcache(
+                    q=q.unsqueeze(1),
+                    k_cache=workspace.view(
+                        num_decode_tokens, total_width, 1, self.head_dim
+                    ),
+                    block_table=None,
+                    head_dim_v=self.head_dim,
+                    tile_scheduler_metadata=tile_metadata,
+                    cache_seqlens=None,
+                    is_fp8_kvcache=False,
+                    indices=local_indices.unsqueeze(1),
+                    topk_length=main_lens + swa_lens,
+                    extra_k_cache=None,
+                    extra_indices_in_kvcache=None,
+                    extra_topk_length=None,
+                    softmax_scale=self.scale,
+                    attn_sink=self.attn_sink,
+                    out=output.unsqueeze(1),
+                )
+            if (
+                os.getenv("VLLM_DSV4_INT8_ATTN_DIAG") == "1"
+                and not self._int8_attn_diag_done
+                and os.getenv(
+                    "VLLM_DSV4_INT8_ATTN_DIAG_LAYER", "layers.2"
+                ) in self.prefix
+            ):
+                self._int8_attn_diag_done = True
+                row = 0
+                length = int((main_lens[row] + swa_lens[row]).item())
+                heads = min(self.num_heads, 8)
+                q_ref = q[row, :heads].float()
+                kv_ref = workspace[row, :length].float()
+                scores = torch.matmul(q_ref, kv_ref.T) * self.scale
+                sink = self.attn_sink[:heads].float()
+                row_max = torch.maximum(scores.amax(dim=-1), sink)
+                probabilities = torch.exp(scores - row_max[:, None])
+                denominator = (
+                    probabilities.sum(dim=-1)
+                    + torch.exp(sink - row_max)
+                )
+                reference = torch.matmul(probabilities, kv_ref)
+                reference /= denominator[:, None]
+                actual = output[row, :heads].float()
+                error = actual - reference
+                payload = {
+                    "prefix": self.prefix,
+                    "rank": int(os.getenv("LOCAL_RANK", "0")),
+                    "compress_ratio": self.compress_ratio,
+                    "main_length": int(main_lens[row].item()),
+                    "swa_length": int(swa_lens[row].item()),
+                    "mae": error.abs().mean().item(),
+                    "rmse": error.square().mean().sqrt().item(),
+                    "max_abs": error.abs().amax().item(),
+                    "reference_rms": reference.square().mean().sqrt().item(),
+                    "cosine": torch.nn.functional.cosine_similarity(
+                        actual, reference, dim=-1
+                    ).mean().item(),
+                }
+                output_dir = os.getenv(
+                    "VLLM_DSV4_INT8_ATTN_DIAG_DIR",
+                    "/tmp/dsv4_int8_attn_diag",
+                )
+                os.makedirs(output_dir, exist_ok=True)
+                output_path = os.path.join(
+                    output_dir,
+                    f"rank{payload['rank']}_cr{self.compress_ratio}_"
+                    f"{os.getpid()}.json",
+                )
+                with open(output_path, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, indent=2)
             return
 
         # We treat queries in the same seq as different queries
@@ -941,6 +1290,13 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         # Reshape KV cache to (num_blocks, block_size, 1, head_bytes)
         if kv_cache is not None:
             kv_cache = kv_cache.unsqueeze(-2)
+        if os.getenv("VLLM_DSV4_FP8_SHAPE_DIAG") == "1":
+            logger.warning_once(
+                "FP8 decode cache shapes: swa=%s main=%s dtype=%s",
+                tuple(swa_cache.shape),
+                None if kv_cache is None else tuple(kv_cache.shape),
+                self.kv_cache_dtype,
+            )
 
         # One FlashMLASchedMeta per layer type, shared across all same-type
         # layers within this decode step. The first forward call per type
@@ -973,7 +1329,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             head_dim_v=512,
             tile_scheduler_metadata=tile_metadata,
             cache_seqlens=None,
-            is_fp8_kvcache=True,
+            is_fp8_kvcache=not self.use_bf16_kv_cache,
             indices=swa_indices,
             topk_length=swa_lens,
             softmax_scale=self.scale,
@@ -1050,27 +1406,36 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 # Gather compressed KV
                 assert attn_metadata is not None
                 block_table = attn_metadata.block_table[num_decodes:]
-                self._gather_paged_cache(
-                    kv[:chunk_size],
-                    compressed_k_cache,
-                    seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
-                    gather_lens=None,
-                    block_table=block_table[chunk_start:chunk_end],
-                    block_size=attn_metadata.block_size // self.compress_ratio,
-                    offset=0,
+                gather_args = (
+                    kv[:chunk_size], compressed_k_cache,
+                    seq_lens[chunk_start:chunk_end] // self.compress_ratio,
+                    None, block_table[chunk_start:chunk_end],
+                    attn_metadata.block_size // self.compress_ratio, 0,
                 )
+                if self.use_int8_kv_cache:
+                    self._gather_paged_cache(
+                        *gather_args, fp8_cache=self.main_kv_fp8_override
+                    )
+                else:
+                    self._gather_paged_cache(*gather_args)
 
             # Gather SWA KV
             swa_block_table = swa_metadata.block_table[num_decodes:]
-            self._gather_paged_cache(
-                kv[:chunk_size],
-                swa_k_cache,
-                seq_lens=seq_lens[chunk_start:chunk_end],
-                gather_lens=gather_lens[chunk_start:chunk_end],
-                block_table=swa_block_table[chunk_start:chunk_end],
-                block_size=swa_metadata.block_size,
-                offset=N,
+            gather_args = (
+                kv[:chunk_size], swa_k_cache,
+                seq_lens[chunk_start:chunk_end],
+                gather_lens[chunk_start:chunk_end],
+                swa_block_table[chunk_start:chunk_end],
+                swa_metadata.block_size, N,
             )
+            if self.use_int8_kv_cache:
+                self._gather_paged_cache(
+                    *gather_args,
+                    fp8_cache=self.swa_kv_fp8_override,
+                    official_fp8_cache=self.swa_official_fp8,
+                )
+            else:
+                self._gather_paged_cache(*gather_args)
 
             # Combine the topk indices and SWA indices for gathered KV cache
             query_start = (
@@ -1102,6 +1467,57 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 topk_length=combined_lens,
                 out=output[query_start:query_end],
             )
+            if (
+                self.use_int8_kv_cache
+                and os.getenv("VLLM_DSV4_INT8_PREFILL_DIAG") == "1"
+                and not self._int8_prefill_diag_done
+                and os.getenv(
+                    "VLLM_DSV4_INT8_PREFILL_DIAG_LAYER", "layers.2"
+                ) in self.prefix
+            ):
+                self._int8_prefill_diag_done = True
+                local_query = query_end - query_start - 1
+                length = int(combined_lens[local_query].item())
+                heads = min(self.num_heads, 8)
+                selected = combined_indices[local_query, :length].long()
+                kv_ref = kv.view(-1, self.head_dim)[selected].float()
+                q_ref = q[query_start + local_query, :heads].float()
+                scores = torch.matmul(q_ref, kv_ref.T) * self.scale
+                sink = self.attn_sink[:heads].float()
+                row_max = torch.maximum(scores.amax(dim=-1), sink)
+                probabilities = torch.exp(scores - row_max[:, None])
+                denominator = probabilities.sum(dim=-1) + torch.exp(
+                    sink - row_max
+                )
+                reference = torch.matmul(probabilities, kv_ref)
+                reference /= denominator[:, None]
+                actual = output[query_start + local_query, :heads].float()
+                error = actual - reference
+                payload = {
+                    "prefix": self.prefix,
+                    "rank": int(os.getenv("LOCAL_RANK", "0")),
+                    "compress_ratio": self.compress_ratio,
+                    "selected_length": length,
+                    "mae": error.abs().mean().item(),
+                    "rmse": error.square().mean().sqrt().item(),
+                    "max_abs": error.abs().amax().item(),
+                    "reference_rms": reference.square().mean().sqrt().item(),
+                    "cosine": torch.nn.functional.cosine_similarity(
+                        actual, reference, dim=-1
+                    ).mean().item(),
+                }
+                output_dir = os.getenv(
+                    "VLLM_DSV4_INT8_PREFILL_DIAG_DIR",
+                    "/tmp/dsv4_int8_prefill_diag",
+                )
+                os.makedirs(output_dir, exist_ok=True)
+                output_path = os.path.join(
+                    output_dir,
+                    f"rank{payload['rank']}_cr{self.compress_ratio}_"
+                    f"{os.getpid()}.json",
+                )
+                with open(output_path, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, indent=2)
 
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
@@ -1172,8 +1588,15 @@ class DeepseekV4Indexer(nn.Module):
         self.use_fp4_kv = self.vllm_config.attention_config.use_fp4_indexer_cache
         self.use_int8_kv = (
             cache_config is not None
-            and cache_config.cache_dtype == _INT8_KV_DTYPE
+            and cache_config.cache_dtype in _INT8_KV_DTYPES
         )
+        self.use_bf16_kv = (
+            cache_config is not None
+            and cache_config.cache_dtype in ("bf16", "bfloat16")
+        )
+        indexer_override = os.getenv("VLLM_DSV4_INT8_INDEXER_CACHE")
+        if indexer_override is not None:
+            self.use_int8_kv = indexer_override == "1"
         if self.use_int8_kv:
             assert not self.use_fp4_kv, (
                 "INT8 and MXFP4 indexer cache cannot both be enabled"
@@ -1223,10 +1646,14 @@ class DeepseekV4Indexer(nn.Module):
         # head_dim bytes = 128 fp8 + 4 fp32 scale = 132.
         # For FP4 indexer cache, we still allocate the same amount of memory as FP8,
         # but only use the first half of the memory.
-        k_cache_head_dim = self.head_dim + self.head_dim // self.quant_block_size * 4
+        k_cache_head_dim = (
+            self.head_dim
+            if self.use_bf16_kv
+            else self.head_dim + self.head_dim // self.quant_block_size * 4
+        )
         self.k_cache = DeepseekV4IndexerCache(
             head_dim=k_cache_head_dim,
-            dtype=torch.uint8,
+            dtype=torch.bfloat16 if self.use_bf16_kv else torch.uint8,
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
             compress_ratio=self.compress_ratio,
@@ -1242,7 +1669,13 @@ class DeepseekV4Indexer(nn.Module):
             use_fp4_cache=self.use_fp4_kv,
         )
 
-        self.indexer_op = SparseAttnIndexerFL(
+        indexer_cls = (
+            SparseAttnIndexerBF16 if self.use_bf16_kv else SparseAttnIndexerFL
+        )
+        indexer_kwargs = {"skip_k_cache_insert": True}
+        if not self.use_bf16_kv:
+            indexer_kwargs["use_fp4_cache"] = self.use_fp4_kv
+        self.indexer_op = indexer_cls(
             self.k_cache,
             self.quant_block_size,
             self.scale_fmt,
@@ -1251,8 +1684,7 @@ class DeepseekV4Indexer(nn.Module):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
-            skip_k_cache_insert=True,
-            use_fp4_cache=self.use_fp4_kv,
+            **indexer_kwargs,
         )
 
     def forward(
@@ -1268,7 +1700,16 @@ class DeepseekV4Indexer(nn.Module):
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
         k = self.compressor(compressed_kv_score, positions, rotary_emb)
-        if self.use_int8_kv:
+        if self.use_bf16_kv:
+            q_quant, weights = _fused_indexer_q_rope(
+                positions,
+                q,
+                rotary_emb.cos_sin_cache,
+                indexer_weights,
+                self.softmax_scale,
+                self.n_head**-0.5,
+            )
+        elif self.use_int8_kv:
             q_quant, weights = fused_indexer_q_rope_quant_int8(
                 positions,
                 q,

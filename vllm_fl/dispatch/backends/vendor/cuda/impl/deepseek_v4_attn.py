@@ -264,10 +264,10 @@ def flash_mla_with_kvcache_cuda(
         extra_topk_length,
         out,
     ):
-        if not is_fp8_kvcache:
+        if not is_fp8_kvcache and k_cache.dtype != torch.bfloat16:
             raise ValueError(
-                "flash_mla_with_kvcache only accepts the FP8 cache format; "
-                "INT8 KV cache must be dequantized to BF16 first"
+                "Non-FP8 FlashMLA cache input must already be dequantized "
+                "to BF16"
             )
         from vllm.v1.attention.ops.flashmla import flash_mla_with_kvcache
 

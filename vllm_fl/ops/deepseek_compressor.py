@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+import json
+import os
 from typing import Any, ClassVar, cast
 
 import torch
@@ -156,7 +158,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         # Block size is constrained by tensor sharing between compressor states
         # and KV blocks. Since compressor states share the same physical tensor
         # as KV blocks, they must use the same page size.
-        # The KV block shape [256//4, head_dim] = [64, 584] determines:
+        # The KV block shape [256//4, head_dim] = [64, 608] determines:
         # - C4 compressor block shape [4, 2*512*2*4] -> block_size = 4
         # - C128 compressor block shape [8, 512*2*4] -> block_size = 8
         # TODO(yifan): make block size automatically determined and configurable.
@@ -205,10 +207,48 @@ class DeepseekCompressor(nn.Module):
         self.quant_config = vllm_config.quant_config
         self.use_fp4_cache = use_fp4_cache
         requested_int8 = (
-            vllm_config.cache_config.cache_dtype == "int8_per_token_head"
+            vllm_config.cache_config.cache_dtype
+            == "int8_per_token_head"
         )
+        requested_bf16 = vllm_config.cache_config.cache_dtype in (
+            "bf16", "bfloat16"
+        )
+        layer_list = os.getenv("VLLM_DSV4_INT8_ATTN_LAYERS")
+        layer_range = os.getenv("VLLM_DSV4_INT8_ATTN_LAYER_RANGE")
+        if requested_int8 and layer_list and ".layers." in prefix:
+            layer = int(prefix.split(".layers.", 1)[1].split(".", 1)[0])
+            requested_int8 = layer in {
+                int(item) for item in layer_list.split(",") if item.strip()
+            }
+        elif requested_int8 and layer_range and ".layers." in prefix:
+            start_text, end_text = layer_range.split(":", 1)
+            layer = int(prefix.split(".layers.", 1)[1].split(".", 1)[0])
+            requested_int8 = int(start_text) <= layer <= int(end_text)
+        indexer_override = os.getenv("VLLM_DSV4_INT8_INDEXER_CACHE")
+        if head_dim == 128 and indexer_override is not None:
+            requested_int8 = indexer_override == "1"
+        layer_mode = os.getenv("VLLM_DSV4_INT8_ATTN_LAYER_MODE")
+        if head_dim == 512:
+            layer_is_compressed = compress_ratio > 1
+            if layer_mode == "swa_only" and layer_is_compressed:
+                requested_int8 = False
+            elif layer_mode == "compressed" and not layer_is_compressed:
+                requested_int8 = False
         self.use_int8_kv_cache = head_dim == 512 and requested_int8
         self.use_int8_indexer_cache = head_dim == 128 and requested_int8
+        skip_layers = {
+            int(value) for value in os.getenv(
+                "VLLM_DSV4_INT8_KV_SKIP_LAYERS", ""
+            ).split(",") if value.strip()
+        }
+        current_layer = (
+            int(prefix.split(".layers.", 1)[1].split(".", 1)[0])
+            if ".layers." in prefix else -1
+        )
+        self.store_fp8_main_cache = (
+            self.use_int8_kv_cache and current_layer in skip_layers
+        )
+        self._quant_diag_done = False
 
         config = vllm_config.model_config.hf_config
         self.rope_head_dim = config.qk_rope_head_dim
@@ -259,9 +299,8 @@ class DeepseekCompressor(nn.Module):
         # the weight quantization config — an INT-quantized checkpoint can still
         # hold an FP8, MXFP4 or INT8 KV cache. The writer picked here must match
         # what the reader in deepseek_v4_attention.py expects, otherwise the
-        # cached bytes get reinterpreted under the wrong encoding (silently, as
-        # all layouts share the same 584B page geometry).
-        if self.quant_config is not None:
+        # cached bytes get reinterpreted under the wrong encoding.
+        if self.quant_config is not None and not requested_bf16:
             if self.head_dim == 512:
                 assert not use_fp4_cache, (
                     "MXFP4 cache is only supported for indexer (head=128)"
@@ -306,11 +345,14 @@ class DeepseekCompressor(nn.Module):
             ### USE BF16 KERNELS
             if self.head_dim == 512:
                 self._fused_kernel = _fused_kv_compress_norm_rope_insert_sparse_attn_bf16
-                self._token_stride = self.head_dim * 2
+                # Triton pointer arithmetic is in elements, not bytes.  The
+                # BF16 writer receives a bfloat16* cache pointer, so advancing
+                # one token requires HEAD_SIZE elements (512), not 1024 bytes.
+                self._token_stride = self.head_dim
                 self._num_warps = 4
             elif self.head_dim == 128:
                 self._fused_kernel = _fused_kv_compress_norm_rope_insert_indexer_attn_bf16
-                self._token_stride = self.head_dim * 2
+                self._token_stride = self.head_dim
                 self._num_warps = 1
             else:
                 raise ValueError(
@@ -396,6 +438,8 @@ class DeepseekCompressor(nn.Module):
                 "QUANT_BLOCK": self._quant_block,
                 "SCALE_DIM": self._scale_dim,
             }
+            if self.head_dim == 512 and self.use_int8_kv_cache:
+                quant_kwargs["STORE_FP8"] = self.store_fp8_main_cache
 
         self._fused_kernel[(num_actual,)](
             # state cache
@@ -432,6 +476,228 @@ class DeepseekCompressor(nn.Module):
             launch_pdl=False,
             **quant_kwargs,
         )
+
+        if (
+            os.getenv("VLLM_DSV4_MAIN_KV_QUANT_DIAG") == "1"
+            and self.head_dim == 512
+            and not self._quant_diag_done
+            and (
+                os.getenv("VLLM_DSV4_MAIN_KV_QUANT_DIAG_LAYER", "layers.2")
+                == "all"
+                or os.getenv(
+                    "VLLM_DSV4_MAIN_KV_QUANT_DIAG_LAYER", "layers.2"
+                ) in self.prefix
+            )
+        ):
+            self._quant_diag_done = True
+            self._diagnose_main_kv_quantization(
+                state_cache, state_width, token_to_req_indices, positions,
+                slot_mapping, block_table, block_size, kv_cache,
+                k_cache_metadata.slot_mapping, cos_sin_cache,
+            )
+
+    @torch.no_grad()
+    def _diagnose_main_kv_quantization(
+        self, state_cache: torch.Tensor, state_width: int,
+        token_to_req: torch.Tensor, positions: torch.Tensor,
+        state_slots: torch.Tensor, block_table: torch.Tensor,
+        state_block_size: int, kv_cache: torch.Tensor,
+        kv_slots: torch.Tensor, cos_sin_cache: torch.Tensor,
+    ) -> None:
+        """Compare production per-head INT8 with hypothetical 7-block INT8."""
+        valid = (
+            (state_slots >= 0)
+            & (((positions + 1) % self.compress_ratio) == 0)
+        ).nonzero(as_tuple=False).flatten()
+        if valid.numel() == 0:
+            self._quant_diag_done = False
+            return
+
+        pos = positions[valid].long()
+        req = token_to_req[valid].long()
+        count = self.coff * self.compress_ratio
+        history = torch.arange(count, device=pos.device, dtype=torch.long)
+        history_pos = pos[:, None] - count + 1 + history[None, :]
+        history_valid = history_pos >= 0
+        safe_history_pos = history_pos.clamp_min(0)
+        physical_blocks = block_table[
+            req[:, None], safe_history_pos // state_block_size
+        ].long()
+        block_offsets = safe_history_pos % state_block_size
+        rows = state_cache[physical_blocks, block_offsets]
+
+        dims = torch.arange(self.head_dim, device=pos.device)
+        overlap = (history >= self.compress_ratio).long() * self.head_dim
+        value_index = overlap[None, :, None] + dims[None, None, :]
+        value_index = value_index.expand(valid.numel(), -1, -1)
+        values = torch.gather(rows, 2, value_index)
+        scores = torch.gather(rows, 2, state_width + value_index)
+        scores = scores.masked_fill(~history_valid[:, :, None], float("-inf"))
+        compressed = (values * torch.softmax(scores, dim=1)).sum(dim=1)
+        variance = compressed.square().mean(dim=-1, keepdim=True)
+        normalized = (
+            compressed * torch.rsqrt(variance + self.rms_norm_eps)
+            * self.norm.weight.float()
+        ).to(torch.bfloat16).float()
+        x = normalized[:, :448]
+
+        single_scale = x.abs().amax(dim=-1, keepdim=True).clamp_min(1e-12) / 127
+        single_dq = torch.round(x / single_scale).clamp(-127, 127) * single_scale
+        x_blocks = x.view(-1, 7, 64)
+        block_absmax = x_blocks.abs().amax(dim=-1, keepdim=True)
+        block_scale = block_absmax.clamp_min(1e-12) / 127
+        block_dq = (
+            torch.round(x_blocks / block_scale).clamp(-127, 127) * block_scale
+        ).view_as(x)
+        fp8_raw_scale = block_absmax.clamp_min(1e-4) / 448.0
+        fp8_scale = torch.pow(2.0, torch.ceil(torch.log2(fp8_raw_scale)))
+        fp8_dq = (
+            (x_blocks / fp8_scale)
+            .clamp(-448.0, 448.0)
+            .to(torch.float8_e4m3fn)
+            .float()
+            * fp8_scale
+        ).view_as(x)
+
+        # Per (compressed token, 64-channel group) diagnostics.  Keep the
+        # highest-impact rows rather than dumping every activation value.
+        block_error = (block_dq.view_as(x_blocks) - x_blocks).float()
+        group_mae = block_error.abs().mean(dim=-1)
+        group_rmse = block_error.square().mean(dim=-1).sqrt()
+        group_max_error = block_error.abs().amax(dim=-1)
+        group_rms = x_blocks.square().mean(dim=-1).sqrt()
+        group_outlier_ratio = (
+            block_absmax.squeeze(-1) / group_rms.clamp_min(1e-12)
+        )
+
+        def top_group_rows(metric: torch.Tensor, limit: int = 256) -> list[dict]:
+            count = min(limit, metric.numel())
+            flat_values, flat_indices = torch.topk(metric.flatten(), count)
+            token_indices = flat_indices // 7
+            group_indices = flat_indices % 7
+            rows = []
+            for value, token_index, group_index in zip(
+                flat_values.cpu().tolist(),
+                token_indices.cpu().tolist(),
+                group_indices.cpu().tolist(),
+            ):
+                rows.append({
+                    "metric": value,
+                    "request_index": int(req[token_index].item()),
+                    "source_position": int(pos[token_index].item()),
+                    "compressed_position": int(
+                        (pos[token_index] // self.compress_ratio).item()
+                    ),
+                    "group": int(group_index),
+                    "channel_start": int(group_index * 64),
+                    "absmax": float(
+                        block_absmax[token_index, group_index, 0].item()
+                    ),
+                    "scale": float(block_scale[token_index, group_index, 0].item()),
+                    "mae": float(group_mae[token_index, group_index].item()),
+                    "rmse": float(group_rmse[token_index, group_index].item()),
+                    "max_error": float(
+                        group_max_error[token_index, group_index].item()
+                    ),
+                    "outlier_ratio": float(
+                        group_outlier_ratio[token_index, group_index].item()
+                    ),
+                })
+            return rows
+
+        # Read back the exact bytes written by the production kernel. This
+        # distinguishes quantization loss from writer history/slot/layout bugs.
+        selected_kv_slots = kv_slots[valid].long()
+        kv_block_size = kv_cache.shape[1]
+        kv_blocks = selected_kv_slots // kv_block_size
+        kv_offsets = selected_kv_slots % kv_block_size
+        flat_u8 = kv_cache.view(torch.uint8).view(kv_cache.shape[0], -1)
+        nope_bytes = (
+            kv_offsets[:, None] * 576
+            + torch.arange(448, device=x.device)[None, :]
+        )
+        writer_q = torch.gather(flat_u8[kv_blocks], 1, nope_bytes).view(torch.int8)
+        flat_f32 = flat_u8.view(torch.float32)
+        scale_indices = (
+            (kv_block_size * 576 + kv_offsets[:, None] * 32) // 4
+            + torch.arange(7, device=x.device)[None, :]
+        )
+        writer_scales = torch.gather(flat_f32[kv_blocks], 1, scale_indices)
+        writer_dq = (
+            writer_q.float().view(-1, 7, 64) * writer_scales[:, :, None]
+        ).view_as(x)
+
+        rope_byte_indices = (
+            kv_offsets[:, None] * 576 + 448
+            + torch.arange(128, device=x.device)[None, :]
+        )
+        writer_rope = torch.gather(
+            flat_u8[kv_blocks], 1, rope_byte_indices
+        ).contiguous().view(torch.bfloat16).float()
+        rope = normalized[:, 448:].view(-1, 32, 2)
+        compressed_pos = (pos // self.compress_ratio) * self.compress_ratio
+        cs = cos_sin_cache[compressed_pos]
+        cos, sin = cs[:, :32], cs[:, 32:64]
+        rope_ref = torch.stack(
+            (rope[..., 0] * cos - rope[..., 1] * sin,
+             rope[..., 1] * cos + rope[..., 0] * sin),
+            dim=-1,
+        ).flatten(1).to(torch.bfloat16).float()
+
+        def metrics(dq: torch.Tensor) -> dict[str, float]:
+            error = dq - x
+            signal = x.square().mean().sqrt()
+            noise = error.square().mean().sqrt()
+            cosine = torch.nn.functional.cosine_similarity(x, dq, dim=-1).mean()
+            return {
+                "mae": error.abs().mean().item(),
+                "rmse": noise.item(),
+                "max_abs": error.abs().amax().item(),
+                "cosine": cosine.item(),
+                "sqnr_db": (20 * torch.log10(signal / noise)).item(),
+            }
+
+        payload = {
+            "prefix": self.prefix,
+            "rank": int(os.getenv("LOCAL_RANK", "0")),
+            "compress_ratio": self.compress_ratio,
+            "tokens": valid.numel(),
+            "single_scale": metrics(single_dq),
+            "seven_block_scale": metrics(block_dq),
+            "fp8_seven_block_ue8m0": metrics(fp8_dq),
+            "writer_roundtrip": metrics(writer_dq),
+            "writer_vs_seven_block_rmse": (
+                (writer_dq - block_dq).square().mean().sqrt().item()
+            ),
+            "writer_scale_max_abs_diff": (
+                writer_scales - block_scale.squeeze(-1)
+            ).abs().amax().item(),
+            "writer_rope_max_abs_diff": (
+                writer_rope - rope_ref
+            ).abs().amax().item(),
+            "global_absmax_mean": x.abs().amax(dim=-1).mean().item(),
+            "block_absmax_mean": block_absmax.mean(dim=(0, 2)).tolist(),
+            "global_to_median_block_absmax": (
+                x.abs().amax(dim=-1)
+                / block_absmax.squeeze(-1).median(dim=-1).values.clamp_min(1e-12)
+            ).mean().item(),
+            "group_mae_mean": group_mae.mean(dim=0).tolist(),
+            "group_rmse_mean": group_rmse.mean(dim=0).tolist(),
+            "group_outlier_ratio_mean": group_outlier_ratio.mean(dim=0).tolist(),
+            "top_quant_rmse": top_group_rows(group_rmse),
+            "top_outlier_ratio": top_group_rows(group_outlier_ratio),
+        }
+        output_dir = os.getenv(
+            "VLLM_DSV4_MAIN_KV_QUANT_DIAG_DIR", "/tmp/dsv4_main_kv_diag"
+        )
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(
+            output_dir,
+            f"rank{payload['rank']}_{self.prefix.replace('.', '_')}_"
+            f"cr{self.compress_ratio}_{os.getpid()}.json",
+        )
+        with open(output_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
 
 
 @triton.jit
