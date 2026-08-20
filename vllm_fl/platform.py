@@ -399,7 +399,18 @@ class PlatformFL(Platform):
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
-        if cls.vendor_name in ["nvidia", "ascend", "metax", "hygon", "mthreads", "iluvatar", "thead", "gcu", "kunlunxin"]:
+        if cls.vendor_name in [
+            "nvidia",
+            "ascend",
+            "metax",
+            "hygon",
+            "mthreads",
+            "iluvatar",
+            "thead",
+            "gcu",
+            "enflame",
+            "kunlunxin",
+        ]:
             return True
         return False
 
