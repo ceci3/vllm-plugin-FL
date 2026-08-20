@@ -399,6 +399,9 @@ class PlatformFL(Platform):
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
+        # Current detection reports vendor_name="enflame" and
+        # device_type="gcu". Keep the legacy "gcu" vendor alias for images
+        # built with the earlier detector.
         if cls.vendor_name in [
             "nvidia",
             "ascend",
