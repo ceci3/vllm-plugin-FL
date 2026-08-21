@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -1322,10 +1321,6 @@ class DeepseekV4DecoderLayer(nn.Module):
     ):
         super().__init__()
 
-        self.layer_id = extract_layer_index(prefix)
-        self._stage_dump_call = 0
-        self._layer_dump_call = 0
-
         # Lazy import to avoid top-level tilelang dependency.
         # Registers both torch.ops.vllm.mhc_pre and mhc_post
         import vllm.model_executor.layers.mhc  # noqa: F401
@@ -1400,40 +1395,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
     ):
-        reference_tokens = int(os.environ.get(
-            "VLLM_DSV4_MHC_PRE_REFERENCE_TOKENS", "-1"))
-        if (
-            os.environ.get("VLLM_DSV4_MHC_PRE_REFERENCE") == "1"
-            and x.shape[0] == reference_tokens
-        ):
-            outer_shape = x.shape[:-2]
-            hc_mult, hidden_size = x.shape[-2:]
-            residual = x.reshape(-1, hc_mult, hidden_size)
-            flat = residual.reshape(-1, hc_mult * hidden_size).float()
-            rms = torch.rsqrt(
-                flat.square().mean(dim=-1, keepdim=True) + self.rms_norm_eps)
-            mixes = (flat @ hc_fn.t()) * rms
-            pre_logits, post_logits, comb_logits = torch.split(
-                mixes, [hc_mult, hc_mult, hc_mult * hc_mult], dim=-1)
-            pre = torch.sigmoid(
-                pre_logits * hc_scale[0] + hc_base[:hc_mult]) + self.hc_eps
-            layer_input = (
-                pre.unsqueeze(-1) * residual.float()).sum(dim=-2).to(x.dtype)
-            post = torch.sigmoid(
-                post_logits * hc_scale[1]
-                + hc_base[hc_mult:2 * hc_mult]) * self.hc_post_alpha
-            comb = comb_logits * hc_scale[2] + hc_base[2 * hc_mult:]
-            comb = torch.softmax(comb.view(-1, hc_mult, hc_mult), dim=-1)
-            comb = comb + self.hc_eps
-            comb = comb / (comb.sum(dim=-2, keepdim=True) + self.hc_eps)
-            for _ in range(self.hc_sinkhorn_iters - 1):
-                comb = comb / (comb.sum(dim=-1, keepdim=True) + self.hc_eps)
-                comb = comb / (comb.sum(dim=-2, keepdim=True) + self.hc_eps)
-            return (
-                layer_input.view(*outer_shape, hidden_size),
-                post.view(*outer_shape, hc_mult, 1),
-                comb.view(*outer_shape, hc_mult, hc_mult),
-            )
         post_mix, res_mix, layer_input = _mhc_pre(
             residual=x,
             fn=hc_fn,
@@ -1454,19 +1415,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         post: torch.Tensor,
         comb: torch.Tensor,
     ):
-        reference_tokens = int(os.environ.get(
-            "VLLM_DSV4_MHC_POST_REFERENCE_TOKENS", "-1"))
-        if (
-            os.environ.get("VLLM_DSV4_MHC_POST_REFERENCE") == "1"
-            and x.shape[0] == reference_tokens
-        ):
-            out = post.float() * x.float().unsqueeze(-2)
-            for source in range(residual.shape[-2]):
-                out = out + (
-                    comb[..., source, :].float().unsqueeze(-1)
-                    * residual[..., source, :].float().unsqueeze(-2)
-                )
-            return out.to(residual.dtype)
         return _mhc_post( x=x, residual=residual, post=post, comb=comb)
 
     def forward(
@@ -1480,60 +1428,16 @@ class DeepseekV4DecoderLayer(nn.Module):
             x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
         )
         x = self.attn_norm(x)
-        dump_dir = os.environ.get("VLLM_DSV4_STAGE_DUMP_DIR")
-        dump_tokens = int(os.environ.get("VLLM_DSV4_STAGE_DUMP_TOKENS", "-1"))
-        do_stage_dump = (
-            bool(dump_dir)
-            and self.layer_id == 0
-            and get_tensor_model_parallel_rank() == 0
-            and x.shape[0] == dump_tokens
-        )
-        if do_stage_dump:
-            self._stage_dump_call += 1
-            os.makedirs(dump_dir, exist_ok=True)
-            torch.save(x.detach().cpu(), os.path.join(
-                dump_dir, f"call_{self._stage_dump_call}_attn_input.pt"))
         x = self.attn(positions, x, None)
-        if do_stage_dump:
-            torch.save(x.detach().cpu(), os.path.join(
-                dump_dir, f"call_{self._stage_dump_call}_attn_output.pt"))
-            torch.save(residual.detach().cpu(), os.path.join(
-                dump_dir, f"call_{self._stage_dump_call}_mhc_residual.pt"))
-            torch.save(post.detach().cpu(), os.path.join(
-                dump_dir, f"call_{self._stage_dump_call}_mhc_post_mix.pt"))
-            torch.save(comb.detach().cpu(), os.path.join(
-                dump_dir, f"call_{self._stage_dump_call}_mhc_comb_mix.pt"))
         x = self.hc_post(x, residual, post, comb)
-        if do_stage_dump:
-            torch.save(x.detach().cpu(), os.path.join(
-                dump_dir, f"call_{self._stage_dump_call}_attn_hc_post.pt"))
 
         residual = x
         x, post, comb = self.hc_pre(
             x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
         )
         x = self.ffn_norm(x)
-        if do_stage_dump:
-            torch.save(x.detach().cpu(), os.path.join(
-                dump_dir, f"call_{self._stage_dump_call}_ffn_input.pt"))
         x = self.ffn(x, input_ids)
-        if do_stage_dump:
-            torch.save(x.detach().cpu(), os.path.join(
-                dump_dir, f"call_{self._stage_dump_call}_ffn_output.pt"))
         x = self.hc_post(x, residual, post, comb)
-        layer_dump_dir = os.environ.get("VLLM_DSV4_LAYER_DUMP_DIR")
-        layer_dump_tokens = int(os.environ.get(
-            "VLLM_DSV4_LAYER_DUMP_TOKENS", "-1"))
-        if (
-            layer_dump_dir
-            and get_tensor_model_parallel_rank() == 0
-            and x.shape[0] == layer_dump_tokens
-        ):
-            self._layer_dump_call += 1
-            os.makedirs(layer_dump_dir, exist_ok=True)
-            torch.save(x.detach().cpu(), os.path.join(
-                layer_dump_dir,
-                f"layer_{self.layer_id}_call_{self._layer_dump_call}.pt"))
         return x
 
 
