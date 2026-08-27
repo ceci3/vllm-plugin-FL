@@ -57,11 +57,6 @@ def _register_flagcx_connector():
             )
 
 
-def register_connector_only():
-    """Register FlagCX KV transfer without replacing vLLM's CUDA platform."""
-    _register_flagcx_connector()
-
-
 def _patch_flash_attn_import():
     """Stub vllm.vllm_flash_attn if CUDA flash attention C extensions are missing."""
     import sys
