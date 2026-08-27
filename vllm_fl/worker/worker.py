@@ -66,9 +66,8 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_fl.envs as fl_envs
 
-from vllm_fl.ops.custom_ops import register_oot_ops
 from vllm_fl.dispatch.io_common import managed_inference_mode
-from vllm_fl.utils import get_flag_gems_whitelist_blacklist
+from vllm_fl.utils import get_flag_gems_whitelist_blacklist, is_oot_enabled
 
 logger = init_logger(__name__)
 
@@ -237,7 +236,11 @@ class WorkerFL(WorkerBase):
         for k, v in sorted(os.environ.items()):
             logger.debug("%s=%r", k, v)
 
-        register_oot_ops()
+        if is_oot_enabled():
+            # Importing custom_ops also imports optional DeepSeek-V4/Triton TLE
+            # kernels. Keep that dependency out of the FlagCX-only path.
+            from vllm_fl.ops.custom_ops import register_oot_ops
+            register_oot_ops()
 
         if fl_envs.USE_FLAGGEMS:
             import flag_gems
@@ -660,6 +663,17 @@ class WorkerFL(WorkerBase):
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
         kernel_warmup(self)
+
+        if os.getenv("VLLM_FL_INT8_DIRECT_DECODE", "1").lower() not in (
+            "0", "false", "off", "no"
+        ):
+            # AOT graph/kernel restoration is complete at this point, while
+            # decode CUDA graphs have not yet been captured.
+            from vllm_fl.ops.int8_direct_decode_patch import (
+                install_int8_direct_decode,
+            )
+
+            install_int8_direct_decode()
 
         cuda_graph_memory_bytes = 0
         if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:

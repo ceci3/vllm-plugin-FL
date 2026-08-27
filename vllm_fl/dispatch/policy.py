@@ -189,6 +189,11 @@ class PolicyManager:
 
     def get_policy(self) -> SelectionPolicy:
         """Get the current effective policy (context or global)."""
+        # Serving uses a stable global policy. Once materialized before graph
+        # capture, keep the compiled fast path free of ContextVar.get().
+        if self._global_policy is not None:
+            return self._global_policy
+
         ctx_policy = self._policy_var.get()
         if ctx_policy is not None:
             return ctx_policy
@@ -490,6 +495,8 @@ class _PolicyContext:
             policy_var.reset(self._token)
             self._manager.bump_policy_epoch()
 
+
+PolicyManager.get_instance()
 
 # Convenience functions for easier access
 def get_policy_epoch() -> int:

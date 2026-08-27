@@ -344,7 +344,7 @@ def flash_mla_sparse_fwd_flaggems(
         indices=indices,
         sm_scale=sm_scale,
         attn_sink=attn_sink,
-        topk_length=topk_length)
-    out.copy_(out_tmp)
+        topk_length=topk_length,
+        out=out)
     
-    return out, max_logits, lse
+    return out_tmp, max_logits, lse

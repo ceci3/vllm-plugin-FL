@@ -1445,6 +1445,12 @@ class DeepseekV4DecoderLayer(nn.Module):
 class DeepseekV4Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        from vllm_fl.dispatch import prewarm_cached_ops
+        from vllm_fl.dispatch.manager import get_default_manager
+        from vllm_fl.dispatch.policy import PolicyManager
+        get_default_manager().ensure_initialized()
+        PolicyManager.get_instance().get_policy()
+        prewarm_cached_ops()
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config

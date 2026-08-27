@@ -48,10 +48,10 @@ dependencies = [
 ]
 
 [project.entry-points."vllm.platform_plugins"]
-fl = "vllm_fl:register"
+fl_platform = "vllm_fl:register"
 
 [project.entry-points."vllm.general_plugins"]
-fl = "vllm_fl:register_model"
+fl = "vllm_fl:register_connector_only"
 
 [project.urls]
 Homepage = "https://github.com/flagos-ai/vllm-plugin-FL"

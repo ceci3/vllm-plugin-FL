@@ -729,14 +729,13 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
             M = N + sub.window_size + sub.max_num_batched_tokens
             current_workspace_manager().get_simultaneous(
                 ((PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+                ((sub.max_num_batched_tokens, self.padded_heads, q.shape[-1]), q.dtype),
             )
             out.zero_()
             return
 
-        # Pad q to FlashMLA-required head count (64 or 128)
-        if self.n_local_heads < self.padded_heads:
-            pad_size = self.padded_heads - self.n_local_heads
-            q = F.pad(q, (0, 0, 0, pad_size), value=0.0)
+        # Large prefill padding is materialized in the shared MLA workspace;
+        # decode padding is handled separately on the much smaller decode slice.
 
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
@@ -988,8 +987,13 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         positions: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        assert output.shape == q.shape, (
-            f"output buffer shape {output.shape} must match q shape {q.shape}"
+        assert (
+            output.shape[0] == q.shape[0]
+            and output.shape[1] == self.padded_heads
+            and output.shape[2] == q.shape[2]
+        ), (
+            f"output buffer shape {output.shape} is incompatible with "
+            f"unpadded q shape {q.shape}"
         )
         assert output.dtype == q.dtype, (
             f"output buffer dtype {output.dtype} must match q dtype {q.dtype}"
@@ -1050,6 +1054,9 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
     ) -> None:
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
+        if q.shape[1] < self.padded_heads:
+            pad_size = self.padded_heads - q.shape[1]
+            q = F.pad(q, (0, 0, 0, pad_size), value=0.0)
 
         topk_indices = None
         topk_lens = None
@@ -1258,9 +1265,17 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         num_chunks = (num_prefills + PREFILL_CHUNK_SIZE - 1) // PREFILL_CHUNK_SIZE
 
         workspace_manager = current_workspace_manager()
-        kv = workspace_manager.get_simultaneous(
-            ((PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
-        )[0]
+        kv_shape = ((PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16)
+        if q.shape[1] < self.padded_heads:
+            kv, q_padded = workspace_manager.get_simultaneous(
+                kv_shape,
+                ((q.shape[0], self.padded_heads, q.shape[-1]), q.dtype),
+            )
+            q_padded.zero_()
+            q_padded[:, : q.shape[1]].copy_(q)
+            q = q_padded
+        else:
+            kv = workspace_manager.get_simultaneous(kv_shape)[0]
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * PREFILL_CHUNK_SIZE
             chunk_end = min(chunk_start + PREFILL_CHUNK_SIZE, num_prefills)
