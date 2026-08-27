@@ -201,6 +201,15 @@ class WorkerFL(WorkerBase):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
+
+        if (
+            vllm_config.num_speculative_tokens == 1
+            and vllm_config.scheduler_config.async_scheduling
+        ):
+            vllm_config.scheduler_config.scheduler_cls = (
+                "vllm_fl.worker.scheduler_fl.AsyncSchedulerFL"
+            )
+
         super().__init__(
             vllm_config=vllm_config,
             local_rank=local_rank,
