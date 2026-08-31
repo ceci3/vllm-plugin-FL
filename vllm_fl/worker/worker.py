@@ -664,17 +664,6 @@ class WorkerFL(WorkerBase):
         # cuda graph capture.
         kernel_warmup(self)
 
-        if os.getenv("VLLM_FL_INT8_DIRECT_DECODE", "1").lower() not in (
-            "0", "false", "off", "no"
-        ):
-            # AOT graph/kernel restoration is complete at this point, while
-            # decode CUDA graphs have not yet been captured.
-            from vllm_fl.ops.int8_direct_decode_patch import (
-                install_int8_direct_decode,
-            )
-
-            install_int8_direct_decode()
-
         cuda_graph_memory_bytes = 0
         if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
