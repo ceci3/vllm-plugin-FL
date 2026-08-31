@@ -36,16 +36,11 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
-from vllm_fl.ops.deepseek_v4_int8_kv import (
-    fused_compress_rope_int8_mla_cache_kernel,
-)
-from vllm_fl.ops.deepseek_v4_int8_indexer import (
-    fused_compress_rope_int8_indexer_cache_kernel,
-)
 from vllm_fl.dispatch.backends.vendor.cuda.impl.deepseek_v4_ops.fused_compress import (
     _fused_kv_compress_norm_rope_insert_sparse_attn_bf16,
     _fused_kv_compress_norm_rope_insert_indexer_attn_bf16,
 )
+
 
 class CompressorBackend(AttentionBackend):
     def __init__(self):
@@ -156,7 +151,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         # Block size is constrained by tensor sharing between compressor states
         # and KV blocks. Since compressor states share the same physical tensor
         # as KV blocks, they must use the same page size.
-        # The KV block shape [256//4, head_dim] = [64, 608] determines:
+        # The KV block shape [256//4, head_dim] = [64, 584] determines:
         # - C4 compressor block shape [4, 2*512*2*4] -> block_size = 4
         # - C128 compressor block shape [8, 512*2*4] -> block_size = 8
         # TODO(yifan): make block size automatically determined and configurable.
@@ -204,15 +199,6 @@ class DeepseekCompressor(nn.Module):
         self.k_cache_prefix = k_cache_prefix
         self.quant_config = vllm_config.quant_config
         self.use_fp4_cache = use_fp4_cache
-        requested_int8 = (
-            vllm_config.cache_config.cache_dtype
-            == "int8_per_token_head"
-        )
-        requested_bf16 = vllm_config.cache_config.cache_dtype in (
-            "bf16", "bfloat16"
-        )
-        self.use_int8_kv_cache = head_dim == 512 and requested_int8
-        self.use_int8_indexer_cache = head_dim == 128 and requested_int8
 
         config = vllm_config.model_config.hf_config
         self.rope_head_dim = config.qk_rope_head_dim
@@ -259,36 +245,18 @@ class DeepseekCompressor(nn.Module):
             vllm_config.compilation_config.static_forward_context
         )
 
-        # NOTE: the cache element format is chosen by the *cache* dtype, not by
-        # the weight quantization config — an INT-quantized checkpoint can still
-        # hold an FP8, MXFP4 or INT8 KV cache. The writer picked here must match
-        # what the reader in deepseek_v4_attention.py expects, otherwise the
-        # cached bytes get reinterpreted under the wrong encoding.
-        if self.quant_config is not None and not requested_bf16:
+        if self.quant_config is not None:
             if self.head_dim == 512:
                 assert not use_fp4_cache, (
                     "MXFP4 cache is only supported for indexer (head=128)"
                 )
-                # INT8 shares the FP8 page geometry (576B data + 8B scale slot);
-                # only the NoPE encoding and the scale semantics differ.
-                self._fused_kernel = (
-                    fused_compress_rope_int8_mla_cache_kernel
-                    if self.use_int8_kv_cache
-                    else _fused_kv_compress_norm_rope_insert_sparse_attn
-                )
+                self._fused_kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
                 self._quant_block = 64
                 self._token_stride = self.nope_head_dim + self.rope_head_dim * 2
                 self._scale_dim = self.nope_head_dim // 64 + 1  # 7 real + 1 pad
                 self._num_warps = 4
             elif self.head_dim == 128:
-                if self.use_int8_indexer_cache:
-                    self._fused_kernel = (
-                        fused_compress_rope_int8_indexer_cache_kernel
-                    )
-                    self._quant_block = 128
-                    self._token_stride = self.head_dim
-                    self._scale_dim = 4  # single float32 scale
-                elif use_fp4_cache:
+                if use_fp4_cache:
                     self._fused_kernel = (
                         _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn
                     )
@@ -301,30 +269,19 @@ class DeepseekCompressor(nn.Module):
                     self._token_stride = self.head_dim
                     self._scale_dim = 4  # single float32 scale
                 self._num_warps = 1
-            else:
-                raise ValueError(
-                    f"Unsupported head_dim for fused quant+cache: {self.head_dim}"
-                )
         else:
             ### USE BF16 KERNELS
             if self.head_dim == 512:
                 self._fused_kernel = _fused_kv_compress_norm_rope_insert_sparse_attn_bf16
-                # Triton pointer arithmetic is in elements, not bytes.  The
-                # BF16 writer receives a bfloat16* cache pointer, so advancing
-                # one token requires HEAD_SIZE elements (512), not 1024 bytes.
-                self._token_stride = self.head_dim
+                self._token_stride = self.head_dim * 2
                 self._num_warps = 4
             elif self.head_dim == 128:
                 self._fused_kernel = _fused_kv_compress_norm_rope_insert_indexer_attn_bf16
-                self._token_stride = self.head_dim
+                self._token_stride = self.head_dim * 2
                 self._num_warps = 1
-            else:
-                raise ValueError(
-                    f"Unsupported head_dim for fused bf16 cache: {self.head_dim}"
-                )
             self._scale_dim = None
             self._quant_block = None
-
+            
     def forward(
         self,
         # [num_tokens, 2 * self.coff * self.head_dim]
@@ -438,6 +395,7 @@ class DeepseekCompressor(nn.Module):
             launch_pdl=False,
             **quant_kwargs,
         )
+
 
 @triton.jit
 def _save_partial_states_kernel(
