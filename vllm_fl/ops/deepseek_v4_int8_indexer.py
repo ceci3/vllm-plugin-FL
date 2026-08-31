@@ -242,16 +242,6 @@ def fused_indexer_q_rope_quant_int8(
     return q_int8, weights_out
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"PIPE_STAGES": 1}, num_warps=8, num_stages=1),
-        triton.Config({"PIPE_STAGES": 2}, num_warps=4, num_stages=2),
-        triton.Config({"PIPE_STAGES": 2}, num_warps=8, num_stages=2),
-        triton.Config({"PIPE_STAGES": 3}, num_warps=8, num_stages=3),
-        triton.Config({"PIPE_STAGES": 4}, num_warps=8, num_stages=4),
-    ],
-    key=["num_rows", "num_keys"],
-)
 @triton.jit
 def _int8_mqa_logits_h64_d128_kernel(
     q,
@@ -316,8 +306,20 @@ def _int8_mqa_logits_h64_d128_kernel(
         ends = tl.load(cu_ke + rows, mask=row_mask, other=0)
         starts_min = tl.min(tl.where(row_mask, starts, num_keys), axis=0)
         ends_max = tl.max(tl.where(row_mask, ends, 0), axis=0)
+        # Each packed request owns a narrow contiguous interval in the global
+        # K workspace.  Walking all ``num_n_tiles`` made every M tile scan the
+        # unrelated intervals of the other requests, which becomes dominant
+        # for long-context/high-concurrency prefill.  Start directly at this
+        # M tile's first useful N tile and stop after its last useful tile.
+        # ``n_lane`` still partitions that interval when M is too small to
+        # occupy all SMs by itself.
+        first_n_tile = starts_min // BLOCK_N
+        last_n_tile = tl.minimum(tl.cdiv(ends_max, BLOCK_N), num_n_tiles)
         for pid_n in tl.range(
-            n_lane, num_n_tiles, n_workers, num_stages=PIPE_STAGES
+            first_n_tile + n_lane,
+            last_n_tile,
+            n_workers,
+            num_stages=PIPE_STAGES,
         ):
             keys = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
             key_mask = keys < num_keys
@@ -480,17 +482,23 @@ def int8_mqa_logits(
         and k.is_contiguous()
         and weights.is_contiguous()
     ):
-        # BLOCK_M=2 already fills the 128-row Tensor Core tile (2 rows x 64
-        # heads), but each M tile re-loads Q and the head weights and re-walks
-        # the whole N range.  Widening to 8 amortises that overhead across 4x
-        # more rows; measured on the nsys prefill shape (16384x8192, causal)
-        # it is ~27% faster than BLOCK_M=2 and beats 16, which spills.
-        block_m, block_n = 4, 128
+        # A 128-key tile needs enough registers/shared memory that Hopper can
+        # keep only one 8-warp CTA resident per SM.  Halving N preserves the
+        # K/Q traffic while allowing two resident CTAs; the larger worker grid
+        # then hides the long INT8 MMA/reduction latency on long prefills.
+        block_m, block_n = 4, 64
         num_m_tiles = triton.cdiv(q.shape[0], block_m)
         num_n_tiles = triton.cdiv(num_keys, block_n)
         sm_count = torch.cuda.get_device_properties(q.device).multi_processor_count
         total_tiles = num_m_tiles * num_n_tiles
-        _int8_mqa_logits_h64_d128_kernel[(min(sm_count, total_tiles),)](
+        target_workers = min(2 * sm_count, total_tiles)
+        # Every M lane must own the same number of N shards.  A partially
+        # filled final group would make ``ceil(num_workers / m_workers)`` skip
+        # one shard for the M lanes that do not have a corresponding CTA.
+        m_workers = min(num_m_tiles, target_workers)
+        n_workers = min(max(target_workers // m_workers, 1), num_n_tiles)
+        num_workers = m_workers * n_workers
+        _int8_mqa_logits_h64_d128_kernel[(num_workers,)](
             q,
             k,
             k_scale,
@@ -504,6 +512,9 @@ def int8_mqa_logits(
             num_n_tiles,
             BLOCK_M=block_m,
             BLOCK_N=block_n,
+            PIPE_STAGES=1,
+            num_warps=8,
+            num_stages=1,
         )
         return logits
 
@@ -558,15 +569,17 @@ def _int8_paged_mqa_logits_h64_d128_kernel(
     logits,
     max_model_len,
     NEXT_N: tl.constexpr,
+    PAGES_PER_CTA: tl.constexpr,
 ):
     """DSV4-specialized H=64, D=128, page=64 decode kernel.
 
     This mirrors FlagGems' BF16 specialization: source-level shape literals,
-    one physical page per program, one page-table lookup, unmasked full-page
-    loads, and cache hints matching the reuse distance of Q/K.
+    a small fixed group of physical pages per program, and cache hints matching
+    the reuse distance of Q/K. Grouping amortizes Q/weight loads without
+    collapsing the two-dimensional page parallelism.
     """
     row = tl.program_id(0)
-    logical_block = tl.program_id(1)
+    first_logical_block = tl.program_id(1) * PAGES_PER_CTA
     batch = row // NEXT_N
     next_idx = row % NEXT_N
     # Strides come from the caller: a compact (B, 1) ``context_lens`` passes a
@@ -576,8 +589,8 @@ def _int8_paged_mqa_logits_h64_d128_kernel(
         + batch * context_row_stride
         + next_idx * context_col_stride
     )
-    key_start = logical_block * 64
-    if key_start >= context_len:
+    first_key_start = first_logical_block * 64
+    if first_key_start >= context_len:
         return
 
     heads = tl.arange(0, 64)
@@ -593,32 +606,41 @@ def _int8_paged_mqa_logits_h64_d128_kernel(
         weights + row * 64 + heads, eviction_policy="evict_last"
     )
 
-    physical_block = tl.load(
-        block_table + batch * block_table_stride + logical_block
-    ).to(tl.int64)
-    page_base = physical_block * cache_block_stride
-    k_tile = tl.load(
-        cache + page_base + positions[:, None] * 128 + dims[None, :],
-        eviction_policy="evict_first",
-    ).to(tl.int8)
-    k_scales = tl.load(
-        cache.to(tl.pointer_type(tl.float32))
-        + (page_base + 64 * 128) // 4
-        + positions,
-        eviction_policy="evict_first",
-    )
+    for page_offset in tl.static_range(0, PAGES_PER_CTA):
+        logical_block = first_logical_block + page_offset
+        key_start = logical_block * 64
+        page_valid = key_start < context_len
+        physical_block = tl.load(
+            block_table + batch * block_table_stride + logical_block,
+            mask=page_valid,
+            other=0,
+        ).to(tl.int64)
+        page_base = physical_block * cache_block_stride
+        k_tile = tl.load(
+            cache + page_base + positions[:, None] * 128 + dims[None, :],
+            mask=page_valid,
+            other=0,
+            eviction_policy="evict_first",
+        ).to(tl.int8)
+        k_scales = tl.load(
+            cache.to(tl.pointer_type(tl.float32))
+            + (page_base + 64 * 128) // 4
+            + positions,
+            mask=page_valid,
+            other=0.0,
+            eviction_policy="evict_first",
+        )
 
-    dots = tl.dot(k_tile, tl.trans(q_tile), out_dtype=tl.int32)
-    activated = tl.maximum(dots.to(tl.float32) * k_scales[:, None], 0.0)
-    result = tl.sum(activated * head_weights[None, :], axis=1)
-    output = logits + row * max_model_len + key_start + positions
-    if key_start + 64 <= context_len:
-        tl.store(output, result, eviction_policy="evict_first")
-    else:
+        dots = tl.dot(k_tile, tl.trans(q_tile), out_dtype=tl.int32)
+        activated = tl.maximum(
+            dots.to(tl.float32) * k_scales[:, None], 0.0
+        )
+        result = tl.sum(activated * head_weights[None, :], axis=1)
+        output = logits + row * max_model_len + key_start + positions
         tl.store(
             output,
             result,
-            mask=positions < context_len - key_start,
+            mask=page_valid & (positions < context_len - key_start),
             eviction_policy="evict_first",
         )
 
@@ -766,8 +788,9 @@ def int8_paged_mqa_logits(
         grid_blocks = min(
             triton.cdiv(max_model_len, 64), block_table.shape[1]
         )
+        pages_per_cta = 2
         _int8_paged_mqa_logits_h64_d128_kernel[
-            (batch * next_n, grid_blocks)
+            (batch * next_n, triton.cdiv(grid_blocks, pages_per_cta))
         ](
             q,
             flat,
@@ -781,8 +804,9 @@ def int8_paged_mqa_logits(
             logits,
             max_model_len,
             NEXT_N=next_n,
+            PAGES_PER_CTA=pages_per_cta,
             num_warps=4,
-            num_stages=2,
+            num_stages=1,
         )
         return logits
 

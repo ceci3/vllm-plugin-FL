@@ -35,7 +35,7 @@ import time
 from datetime import datetime
 from statistics import mean
 
-MODEL = "/data/models/Qwen/Qwen3.6-27B"
+MODEL = "/public-nvme/models/DeepSeek-V4-Flash-0731-INT"
 
 # total runs for each case
 RUNS = 4
