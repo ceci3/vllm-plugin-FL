@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import json
 import os
-import socket
 import sys
 import threading
 import time
@@ -314,9 +312,7 @@ class FlagCXConnectorScheduler:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
-        self.side_channel_host = os.getenv(
-            "FLAGCX_ADVERTISE_HOST", socket.gethostbyname(socket.gethostname())
-        )
+        self.side_channel_host = get_ip()
         self.side_channel_port = _get_side_channel_port(vllm_config)
 
         assert vllm_config.kv_transfer_config
@@ -447,8 +443,9 @@ class FlagCXConnectorScheduler:
 
         elif params.get("do_remote_decode"):
             if not params.get("transfer_id"):
-                params["transfer_id"] = str(uuid.uuid4())
-            self._reqs_need_send[request.request_id] = (request, [])
+                logger.warning("Missing transfer_id in KVTransferParams: %s", params)
+            else:
+                self._reqs_need_send[request.request_id] = (request, [])
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -537,9 +534,7 @@ class FlagCXConnectorWorker:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.engine_id: EngineId = engine_id
-        self.hostname = os.getenv(
-            "FLAGCX_ADVERTISE_HOST", socket.gethostbyname(socket.gethostname())
-        )
+        self.hostname = get_ip()
 
         # ---- FlagCX library ----
         library_path = os.getenv("FLAGCX_LIB_PATH")
@@ -726,7 +721,7 @@ class FlagCXConnectorWorker:
 
                 if isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
                     kv_block_len = layer_spec.page_size_bytes
-                elif self.kv_topo.virtually_split_kv_in_blocks and not isinstance(
+                elif self.kv_topo.is_kv_layout_blocks_first and not isinstance(
                     layer_spec, MambaSpec
                 ):
                     # Blocks-first packs K and V in one block; each is half.
@@ -764,7 +759,7 @@ class FlagCXConnectorWorker:
         # connect to "{hostname}:{rpc_port}" for the data-plane transfer.
         self.rpc_port = self.flagcx.flagcxP2pGetRpcPort(self.engine)
 
-        logger.warning(
+        logger.info(
             "KV cache registered: %d regions across %d MRs, rpc_port=%d.",
             len(region_base_addresses),
             len(kv_data_ptrs),
@@ -870,7 +865,7 @@ class FlagCXConnectorWorker:
         group_indices: list[int],
     ) -> list[TransferRegion]:
         split_kv_regions = None
-        if self.kv_topo.virtually_split_kv_in_blocks:
+        if self.kv_topo.is_kv_layout_blocks_first:
             split_kv_regions = [
                 not isinstance(
                     self._layer_specs[layer_name],
@@ -884,7 +879,7 @@ class FlagCXConnectorWorker:
             kv_block_lens=kv_block_lens,
             layer_names=layer_names,
             layer_indices=layer_indices,
-            is_kv_layout_blocks_first=self.kv_topo.virtually_split_kv_in_blocks,
+            is_kv_layout_blocks_first=self.kv_topo.is_kv_layout_blocks_first,
             group_indices=group_indices,
             split_kv_regions=split_kv_regions,
         )
@@ -1010,33 +1005,6 @@ class FlagCXConnectorWorker:
 
         if sizes:
             self.flagcx.flagcxP2pBatchWriteSync(conn, src_vas, dst_vas, sizes)
-        transfer_seconds = time.perf_counter() - start_time
-        transfer_bytes = sum(int(size) for size in sizes)
-
-        stats_path = os.getenv("FLAGCX_TRANSFER_STATS_PATH")
-        if stats_path:
-            record = {
-                "timestamp_ns": time.time_ns(),
-                "request_ids": [str(req_id) for req_id, _ in ready_reqs],
-                "tp_rank": self.tp_rank,
-                "remote": remote_session,
-                "xfers": len(sizes),
-                "bytes": transfer_bytes,
-                "seconds": transfer_seconds,
-                "tensor_sizes_bytes": [int(size) for size in sizes],
-            }
-            fd = os.open(
-                stats_path,
-                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                0o644,
-            )
-            try:
-                os.write(
-                    fd,
-                    (json.dumps(record, separators=(",", ":")) + "\n").encode(),
-                )
-            finally:
-                os.close(fd)
 
         finished: list[ReqId] = []
         with self.reqs_need_send.lock:
@@ -1052,6 +1020,13 @@ class FlagCXConnectorWorker:
         if finished:
             with self.finished_sending_reqs.lock:
                 self.finished_sending_reqs.set.update(finished)
+
+        logger.debug(
+            "Sending to %s done (%d xfers), took %s",
+            remote_session,
+            len(sizes),
+            time.perf_counter() - start_time,
+        )
 
     def _build_transfer_params(
         self,
