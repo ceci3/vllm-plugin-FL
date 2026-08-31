@@ -17,8 +17,11 @@ import vllm.envs as envs
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
+from vllm_fl.ops.deepseek_v4_int8_indexer import (
+    fused_indexer_q_rope_quant_int8,
+)
 from vllm_fl.ops.deepseek_v4_int8_woa import fused_inv_rope_quant_int8
-from vllm_fl.ops.sparse_attn_indexer import SparseAttnIndexer
+from vllm_fl.ops.sparse_attn_indexer import SparseAttnIndexerFL
 from vllm.model_executor.layers.utils import cublas_gemm_bf16_bf16_fp32
 from vllm_fl.dispatch import CachedOp
 
@@ -53,6 +56,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.deepseek_compressor import DeepseekCompressor
+from vllm_fl.ops.deepseek_compressor import (
+    DeepseekCompressor as DeepseekIndexerCompressor,
+)
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.input_quant_fp8 import (
@@ -1091,10 +1097,22 @@ class DeepseekV4Indexer(nn.Module):
         self.rope_dim = config.qk_rope_head_dim  # 64
         self.q_lora_rank = q_lora_rank  # 1536
         self.compress_ratio = compress_ratio
-        self.use_fp4_kv = self.vllm_config.attention_config.use_fp4_indexer_cache
+        quantization_config = getattr(config, "quantization_config", None)
+        self.use_int8_kv = (
+            isinstance(quantization_config, dict)
+            and quantization_config.get("format") == "int-quantized"
+        )
+        self.use_fp4_kv = (
+            self.vllm_config.attention_config.use_fp4_indexer_cache
+            and not self.use_int8_kv
+        )
         logger.info_once(
             "Using %s indexer cache for Lighening Indexer.",
-            "MXFP4" if self.use_fp4_kv else "FP8",
+            (
+                "INT8"
+                if self.use_int8_kv
+                else ("MXFP4" if self.use_fp4_kv else "FP8")
+            ),
         )
 
         # no tensor parallel, just replicated
@@ -1141,7 +1159,7 @@ class DeepseekV4Indexer(nn.Module):
             cache_config=cache_config,
             compress_ratio=self.compress_ratio,
         )
-        self.compressor = DeepseekCompressor(
+        self.compressor = DeepseekIndexerCompressor(
             vllm_config=vllm_config,
             compress_ratio=self.compress_ratio,
             hidden_size=hidden_size,
@@ -1150,9 +1168,10 @@ class DeepseekV4Indexer(nn.Module):
             prefix=f"{prefix}.compressor",
             k_cache_prefix=self.k_cache.prefix,
             use_fp4_cache=self.use_fp4_kv,
+            use_int8_indexer_cache=self.use_int8_kv,
         )
 
-        self.indexer_op = SparseAttnIndexer(
+        self.indexer_op = SparseAttnIndexerFL(
             self.k_cache,
             self.quant_block_size,
             self.scale_fmt,
@@ -1178,13 +1197,23 @@ class DeepseekV4Indexer(nn.Module):
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
         k = self.compressor(compressed_kv_score, positions, rotary_emb)
-        q_quant, weights = _fused_indexer_q_rope_quant(
-            positions,
-            q,
-            rotary_emb.cos_sin_cache,
-            indexer_weights,
-            self.softmax_scale,
-            self.n_head**-0.5,
-            use_fp4=self.use_fp4_kv,
-        )
+        if self.use_int8_kv:
+            q_quant, weights = fused_indexer_q_rope_quant_int8(
+                positions,
+                q,
+                rotary_emb.cos_sin_cache,
+                indexer_weights,
+                self.softmax_scale,
+                self.n_head**-0.5,
+            )
+        else:
+            q_quant, weights = _fused_indexer_q_rope_quant(
+                positions,
+                q,
+                rotary_emb.cos_sin_cache,
+                indexer_weights,
+                self.softmax_scale,
+                self.n_head**-0.5,
+                use_fp4=self.use_fp4_kv,
+            )
         return self.indexer_op(hidden_states, q_quant, k, weights)
