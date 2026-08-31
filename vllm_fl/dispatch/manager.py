@@ -190,11 +190,6 @@ class OpManager:
         1. PID check (multi-process safety)
         2. Register built-in operator implementations
         """
-        # The registry is inherited intact by forked workers. Avoid entering an
-        # RLock from a torch.compile fullgraph region once initialization ran.
-        if self._state.initialized:
-            return
-
         with self._lock:
             pid = os.getpid()
 
@@ -618,7 +613,7 @@ class OpManager:
 
 
 # Global default instance
-_default_manager: Optional[OpManager] = OpManager()
+_default_manager: Optional[OpManager] = None
 _manager_lock = threading.RLock()
 
 
