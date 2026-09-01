@@ -4,6 +4,7 @@
 DeepseekV4 MLA Attention Layer
 """
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -1099,6 +1100,8 @@ class DeepseekV4Indexer(nn.Module):
         self.compress_ratio = compress_ratio
         quantization_config = getattr(config, "quantization_config", None)
         self.use_int8_kv = (
+            os.getenv("VLLM_FL_INDEXER_KV_CACHE_DTYPE", "auto").lower() != "fp8"
+            and
             isinstance(quantization_config, dict)
             and quantization_config.get("format") == "int-quantized"
         )
