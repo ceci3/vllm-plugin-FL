@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-
 # Copyright 2026 FlagOS Contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -35,7 +34,7 @@ import time
 from datetime import datetime
 from statistics import mean
 
-MODEL = "/public-nvme/models/DeepSeek-V4-Flash-0731-INT"
+MODEL = "/data/models/Qwen/Qwen3.6-27B"
 
 # total runs for each case
 RUNS = 4
