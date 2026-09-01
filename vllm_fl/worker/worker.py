@@ -66,8 +66,9 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_fl.envs as fl_envs
 
+from vllm_fl.ops.custom_ops import register_oot_ops
 from vllm_fl.dispatch.io_common import managed_inference_mode
-from vllm_fl.utils import get_flag_gems_whitelist_blacklist, is_oot_enabled
+from vllm_fl.utils import get_flag_gems_whitelist_blacklist
 
 logger = init_logger(__name__)
 
@@ -236,11 +237,7 @@ class WorkerFL(WorkerBase):
         for k, v in sorted(os.environ.items()):
             logger.debug("%s=%r", k, v)
 
-        if is_oot_enabled():
-            # Importing custom_ops also imports optional DeepSeek-V4/Triton TLE
-            # kernels. Keep that dependency out of the FlagCX-only path.
-            from vllm_fl.ops.custom_ops import register_oot_ops
-            register_oot_ops()
+        register_oot_ops()
 
         if fl_envs.USE_FLAGGEMS:
             import flag_gems
