@@ -62,7 +62,39 @@ def get_platform_name() -> str:
     return 'unknown'
 
 
-def get_config_path(platform: Optional[str] = None) -> Optional[Path]:
+def _is_deepseek_v4_hopper(platform: str, vllm_config: Any = None) -> bool:
+    if platform != "nvidia":
+        return False
+
+    try:
+        from vllm.platforms import current_platform
+
+        capability = current_platform.get_device_capability()
+        if capability is None or capability.major != 9:
+            return False
+    except (AttributeError, RuntimeError):
+        return False
+
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except (AssertionError, RuntimeError):
+            return False
+
+    model_config = getattr(vllm_config, "model_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    if str(getattr(hf_config, "model_type", "")).lower() == "deepseek_v4":
+        return True
+
+    architectures = getattr(hf_config, "architectures", None) or []
+    return any(str(arch).lower() == "deepseekv4forcausallm" for arch in architectures)
+
+
+def get_config_path(
+    platform: Optional[str] = None, vllm_config: Any = None
+) -> Optional[Path]:
     """
     Get the configuration file path for the specified or detected platform.
 
@@ -75,6 +107,9 @@ def get_config_path(platform: Optional[str] = None) -> Optional[Path]:
     if platform is None:
         platform = get_platform_name()
 
+    if _is_deepseek_v4_hopper(platform, vllm_config):
+        return _CONFIG_DIR / "nvidia_hopper_deepseek_v4.yaml"
+
     # Try platform-specific config
     config_file = _CONFIG_DIR / f"{platform}.yaml"
     if config_file.exists():
@@ -83,7 +118,9 @@ def get_config_path(platform: Optional[str] = None) -> Optional[Path]:
     return None
 
 
-def load_platform_config(platform: Optional[str] = None) -> Optional[dict[str, Any]]:
+def load_platform_config(
+    platform: Optional[str] = None, vllm_config: Any = None
+) -> Optional[dict[str, Any]]:
     """
     Load the configuration for the specified or detected platform.
 
@@ -93,7 +130,7 @@ def load_platform_config(platform: Optional[str] = None) -> Optional[dict[str, A
     Returns:
         Configuration dictionary, or None if no config found.
     """
-    config_path = get_config_path(platform)
+    config_path = get_config_path(platform, vllm_config)
     if config_path is None:
         return None
 
@@ -152,6 +189,21 @@ def get_flagos_blacklist(config: Optional[dict] = None) -> Optional[list[str]]:
     blacklist = config.get('flagos_blacklist', [])
     if isinstance(blacklist, list):
         return [str(op) for op in blacklist]
+    return None
+
+
+def get_flagos_whitelist(
+    config: Optional[dict] = None, vllm_config: Any = None
+) -> Optional[list[str]]:
+    """Extract the FlagOS operator whitelist from a config."""
+    if config is None:
+        config = load_platform_config(vllm_config=vllm_config)
+    if config is None:
+        return None
+
+    whitelist = config.get('flagos_whitelist', [])
+    if isinstance(whitelist, list):
+        return [str(op) for op in whitelist]
     return None
 
 

@@ -237,13 +237,19 @@ class WorkerFL(WorkerBase):
         for k, v in sorted(os.environ.items()):
             logger.debug("%s=%r", k, v)
 
+        from vllm_fl.dispatch.config import get_config_path
+
+        config_path = get_config_path(vllm_config=vllm_config)
+        if config_path and config_path.name == "nvidia_hopper_deepseek_v4.yaml":
+            os.environ.setdefault("VLLM_FL_CONFIG", str(config_path))
+
         register_oot_ops()
 
         if fl_envs.USE_FLAGGEMS:
             import flag_gems
 
-            # Get whitelist and blacklist from environment variables
-            whitelist, blacklist = get_flag_gems_whitelist_blacklist()
+            # Get the effective model/platform or environment configuration.
+            whitelist, blacklist = get_flag_gems_whitelist_blacklist(vllm_config)
 
             # Only rank 0 records the oplist to avoid file truncation and
             # interleaved writes when tensor-parallel-size > 1.
