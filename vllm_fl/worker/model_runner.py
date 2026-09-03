@@ -6720,7 +6720,11 @@ class ModelRunnerFL(
                         shape_block_size,
                         kv_cache_spec.num_kv_heads,
                         kv_cache_spec.head_size,
-                        cache_dtype_str=kv_cache_spec.cache_dtype_str,
+                        cache_dtype_str=getattr(
+                            kv_cache_spec,
+                            "cache_dtype_str",
+                            self.cache_config.cache_dtype,
+                        ),
                     )
                     dtype = kv_cache_spec.dtype
                     try:
@@ -6827,7 +6831,11 @@ class ModelRunnerFL(
                 kernel_block_sizes[group.kv_cache_group_id],
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size,
-                cache_dtype_str=kv_cache_spec.cache_dtype_str,
+                cache_dtype_str=getattr(
+                    kv_cache_spec,
+                    "cache_dtype_str",
+                    self.cache_config.cache_dtype,
+                ),
             )
             # block_dim: 0 means (num_blocks, 2, ...); 1 means (2, num_blocks, ...).
             if block_dim == 0:
