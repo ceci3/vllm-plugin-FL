@@ -24,6 +24,23 @@ def _bind_is_available(fn, is_available_fn):
     return wrapper
 
 
+def _has_vllm_cuda_op(op_name: str):
+    """Build an availability check for a native vLLM CUDA custom op."""
+
+    def is_available() -> bool:
+        try:
+            import torch
+            from vllm import _custom_ops  # noqa: F401
+
+            return torch._C._dispatch_has_kernel_for_dispatch_key(
+                f"_C::{op_name}", "CUDA"
+            )
+        except (ImportError, OSError, RuntimeError):
+            return False
+
+    return is_available
+
+
 def register_builtins(registry) -> None:
     """
     Register all CUDA (VENDOR) operator implementations.
@@ -41,6 +58,17 @@ def register_builtins(registry) -> None:
                kind=BackendImplKind.VENDOR,
                fn=_bind_is_available(backend.fused_marlin_moe, is_avail),
                vendor="cuda", priority=BackendPriority.VENDOR),
+        OpImpl(
+            op_name="cutlass_scaled_mm",
+            impl_id="vendor.cuda",
+            kind=BackendImplKind.VENDOR,
+            fn=_bind_is_available(
+                backend.cutlass_scaled_mm,
+                _has_vllm_cuda_op("cutlass_scaled_mm"),
+            ),
+            vendor="cuda",
+            priority=BackendPriority.VENDOR,
+        ),
         # MoE router GEMM (BF16 inputs, FP32 output)
         OpImpl(
             op_name="router_gemm_bf16_fp32",

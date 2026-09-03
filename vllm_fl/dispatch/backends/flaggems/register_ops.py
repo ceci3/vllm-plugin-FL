@@ -12,7 +12,7 @@ from __future__ import annotations
 import functools
 
 from vllm_fl.dispatch.types import OpImpl, BackendImplKind, BackendPriority
-from vllm_fl.utils import use_flaggems_op
+from vllm_fl.utils import use_flaggems, use_flaggems_op
 
 
 def _bind_is_available(fn, is_available_fn):
@@ -57,6 +57,17 @@ def register_builtins(registry) -> None:
                kind=BackendImplKind.DEFAULT,
                fn=_bind_is_available(backend.fused_marlin_moe, is_avail),
                vendor=None, priority=BackendPriority.DEFAULT),
+        OpImpl(
+            op_name="cutlass_scaled_mm",
+            impl_id="default.flagos",
+            kind=BackendImplKind.DEFAULT,
+            fn=_bind_is_available(
+                backend.cutlass_scaled_mm,
+                _has_flaggems_op("cutlass_scaled_mm"),
+            ),
+            vendor=None,
+            priority=BackendPriority.DEFAULT,
+        ),
         # MoE router GEMM (BF16 inputs, FP32 output)
         OpImpl(
             op_name="router_gemm_bf16_fp32",
@@ -370,5 +381,12 @@ def register_builtins(registry) -> None:
         ),
     ]
 
-    filtered = [impl for impl in impls if use_flaggems_op(impl.op_name)]
+    # Keep this direct backend available without adding it to the FlagGems
+    # patch whitelist, which would replace the native vLLM _C vendor op.
+    filtered = [
+        impl
+        for impl in impls
+        if use_flaggems_op(impl.op_name)
+        or (impl.op_name == "cutlass_scaled_mm" and use_flaggems())
+    ]
     registry.register_many(filtered)

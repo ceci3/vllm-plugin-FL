@@ -40,6 +40,7 @@ _dequantize_and_gather_k_cache = CachedOp("dequantize_and_gather_k_cache")
 _combine_topk_swa_indices = CachedOp("combine_topk_swa_indices")
 _flash_mla_sparse_fwd = CachedOp("flash_mla_sparse_fwd")
 _fused_indexer_q_rope_quant = CachedOp("fused_indexer_q_rope_quant")
+_cutlass_scaled_mm = CachedOp("cutlass_scaled_mm")
 from vllm.utils.torch_utils import direct_register_custom_op
 
 if TYPE_CHECKING:
@@ -220,8 +221,6 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
                 and hasattr(self.wo_a, "_wo_a_grouped_weight_scale")
             )
             if is_dynamic_symmetric_w8a8:
-                from vllm import _custom_ops as ops
-
                 o_q, o_scale = fused_inv_rope_quant_int8(
                     o, positions, self.rotary_emb.cos_sin_cache,
                     self.n_local_groups,
@@ -236,7 +235,7 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
                     weight_scale = (
                         self.wo_a._wo_a_grouped_weight_scale[group_idx]
                     )
-                    outputs.append(ops.cutlass_scaled_mm(
+                    outputs.append(_cutlass_scaled_mm(
                         o_q[group_idx], weight,
                         scale_a=o_scale[group_idx], scale_b=weight_scale,
                         out_dtype=o.dtype,
@@ -340,10 +339,8 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
 
         def shared_w8a8_linear(layer: torch.nn.Module) -> torch.Tensor:
             assert shared_int8 is not None
-            from vllm import _custom_ops as ops
-
             hidden_q, hidden_scale = shared_int8
-            return ops.cutlass_scaled_mm(
+            return _cutlass_scaled_mm(
                 hidden_q, layer.weight, scale_a=hidden_scale,
                 scale_b=layer.weight_scale, out_dtype=hidden_states.dtype,
             )
