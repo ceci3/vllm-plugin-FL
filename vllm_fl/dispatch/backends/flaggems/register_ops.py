@@ -12,7 +12,7 @@ from __future__ import annotations
 import functools
 
 from vllm_fl.dispatch.types import OpImpl, BackendImplKind, BackendPriority
-from vllm_fl.utils import use_flaggems, use_flaggems_op
+from vllm_fl.utils import use_flaggems_op
 
 
 def _bind_is_available(fn, is_available_fn):
@@ -381,12 +381,5 @@ def register_builtins(registry) -> None:
         ),
     ]
 
-    # Keep this direct backend available without adding it to the FlagGems
-    # patch whitelist, which would replace the native vLLM _C vendor op.
-    filtered = [
-        impl
-        for impl in impls
-        if use_flaggems_op(impl.op_name)
-        or (impl.op_name == "cutlass_scaled_mm" and use_flaggems())
-    ]
+    filtered = [impl for impl in impls if use_flaggems_op(impl.op_name)]
     registry.register_many(filtered)
