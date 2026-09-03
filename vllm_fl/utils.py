@@ -99,7 +99,7 @@ def use_flaggems(default: bool = True) -> bool:
     return value.lower() in ("true", "1")
 
 
-def get_flag_gems_whitelist_blacklist(vllm_config=None) -> Tuple[
+def get_flag_gems_whitelist_blacklist() -> Tuple[
     Optional[list[str]], Optional[list[str]]
 ]:
     """
@@ -151,7 +151,7 @@ def get_flag_gems_whitelist_blacklist(vllm_config=None) -> Tuple[
             get_flagos_whitelist,
         )
 
-        config_whitelist = get_flagos_whitelist(vllm_config=vllm_config)
+        config_whitelist = get_flagos_whitelist()
         if config_whitelist:
             return config_whitelist, None
 
