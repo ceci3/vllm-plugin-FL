@@ -4,13 +4,6 @@
 import torch
 
 from vllm.triton_utils import tl, triton
-import triton.experimental.tle.language as tle
-
-
-@triton.jit
-def _async_load(pointer, mask, other):
-    """TLE-Lite async global load, promoted/pipelined by FlagTree FLIR."""
-    return tle.load(pointer, mask=mask, other=other, is_async=True)
 
 
 @triton.jit
@@ -333,11 +326,11 @@ def _int8_mqa_logits_h64_d128_kernel(
                 (tile_max_key >= starts_min) & (tile_min_key < ends_max)
             )
             if tile_overlaps_window:
-                k_tile = _async_load(
+                k_tile = tl.load(
                     k + keys[:, None] * 128 + dims[None, :],
-                    key_mask[:, None], 0,
+                    mask=key_mask[:, None], other=0,
                 )
-                scales = _async_load(k_scale + keys, key_mask, 0.0)
+                scales = tl.load(k_scale + keys, mask=key_mask, other=0.0)
                 dots0 = tl.dot(k_tile, tl.trans(q_tile0), out_dtype=tl.int32)
                 scores0 = tl.reshape(dots0, (BLOCK_N, BLOCK_M, 32)).to(
                     tl.float32
