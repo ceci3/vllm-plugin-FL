@@ -78,6 +78,8 @@ Configuration File (YAML):
 
 import os
 
+import torch
+
 from .types import OpImpl, BackendImplKind, BackendPriority, match_token
 from .registry import OpRegistry, OpRegistrySnapshot
 from .policy import (
@@ -188,9 +190,8 @@ class CachedOp:
 
     def __call__(self, *args, **kwargs):
         # Model construction prewarms and freezes CachedOps before Dynamo
-        # capture. Keep this branch free of manager/policy/fallback state so
-        # torch.compile sees only the selected kernel call.
-        if self._frozen:
+        # capture. During tracing, expose only the selected kernel call.
+        if self._frozen and torch.compiler.is_compiling():
             return self._impl.fn(*args, **kwargs)
 
         mgr = get_default_manager()
@@ -204,12 +205,14 @@ class CachedOp:
         manager_epoch = mgr.policy_epoch
         manager_id = id(mgr)
         policy_epoch = get_policy_epoch()
-        if (
+        cache_invalid = (
             self._manager_id != manager_id
             or self._manager_epoch != manager_epoch
             or self._policy_epoch != policy_epoch
-        ):
+        )
+        if cache_invalid:
             self._impl = None
+            self._frozen = False
             self._use_manager_call = False
 
         if self._use_manager_call:
@@ -252,7 +255,7 @@ def prewarm_cached_ops() -> int:
             impl = mgr._resolve_impl(cached._op_name)
             mgr._record_first_use(cached._op_name, impl)
             cached._impl = impl
-            cached._frozen = True
+            cached._frozen = _OP_FAST_PATH_ENABLED and not is_dump_enabled()
             cached._use_manager_call = False
             cached._manager_id = manager_id
             cached._manager_epoch = mgr.policy_epoch

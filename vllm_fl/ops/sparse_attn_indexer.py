@@ -305,7 +305,9 @@ def sparse_attn_indexer_fl(
                 )
             else:
                 padded_q_quant_decode_tokens = _pack_seq_triton(
-                    q_quant[:num_decode_tokens], decode_lens
+                    q_quant[:num_decode_tokens],
+                    decode_lens,
+                    pad_value=0 if use_int8_cache else -float("inf"),
                 )
                 padded_q_scale = None
         else:
