@@ -304,6 +304,20 @@ class DeepseekV4MultiHeadLatentAttentionFLWrapper(DeepseekV4MultiHeadLatentAtten
 
         return self.wo_b(z.flatten(1))
 
+    def _refresh_combined_compressor_weight(self) -> None:
+        if not hasattr(self, "_combined_compressor_weight"):
+            return
+        assert self.compressor is not None
+        assert self.indexer is not None
+        compressor_weight = self.compressor.fused_wkv_wgate.weight
+        compressor_width = compressor_weight.shape[0]
+        self._combined_compressor_weight[:compressor_width].copy_(
+            compressor_weight
+        )
+        self._combined_compressor_weight[compressor_width:].copy_(
+            self.indexer.compressor.fused_wkv_wgate.weight
+        )
+
     def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
         assert self.aux_stream_list is not None
         assert len(self.aux_stream_list) >= 3

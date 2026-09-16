@@ -1808,6 +1808,10 @@ class DeepseekV4ForCausalLM(nn.Module):
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self.model.finalize_mega_moe_weights()
+        for module in self.model.modules():
+            refresh = getattr(module, "_refresh_combined_compressor_weight", None)
+            if refresh is not None:
+                refresh()
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:

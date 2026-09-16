@@ -237,11 +237,22 @@ class CachedOp:
             return impl.fn(*args, **kwargs)
         except Exception:
             self._impl = None
+            self._frozen = False
             if get_policy().strict:
                 raise
             mgr._mark_failed_impl(self._op_name, impl.impl_id)
             self._use_manager_call = True
-            return mgr.call(self._op_name, *args, **kwargs)
+            result = mgr.call(self._op_name, *args, **kwargs)
+            failed_impls = mgr.get_failed_impls(self._op_name).get(
+                self._op_name, set()
+            )
+            for fallback_impl in mgr.resolve_candidates(self._op_name):
+                if fallback_impl.impl_id not in failed_impls:
+                    self._impl = fallback_impl
+                    self._frozen = True
+                    self._use_manager_call = False
+                    break
+            return result
 
 
 def prewarm_cached_ops() -> int:
